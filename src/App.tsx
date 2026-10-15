@@ -11,7 +11,7 @@ import { GLOBAL_ORDER, PART_ORDER, SALE_PARTS, WorkJob, fileNameFor, type OrderI
 import { parsePassages } from "./ai/passages";
 import { RunStore, summarize, type RunSummary } from "./ai/store";
 import { ProductionStore, REMOTE } from "./ai/remote";
-import { ProductionRoom, type RemoteState } from "./Production";
+import { ProductionRoom, type ProductionHandle, type RemoteState } from "./Production";
 import { DocModal, OutputsPanel, SetModal, WorkOrder, estimate, saleReadyCount, type AiState, type DocRef } from "./Work";
 import { COMPANY, STORAGE_LINK, TODAY_PICK } from "../company.config";
 
@@ -131,6 +131,7 @@ export default function Home() {
   const [remote, setRemote] = useState<RemoteState>("checking");
   const [mcp, setMcp] = useState<Mcp | null>(null);
   const [prodStore, setProdStore] = useState<ProductionStore | null>(null);
+  const productionRef = useRef<ProductionHandle>(null);
   /** 제작실 세션 단계 → 해당 부서 직원들이 출근해 일한다 */
   const onProduction = useCallback((view: ProductionView | null) => engine.setProduction(view), [engine]);
 
@@ -363,37 +364,27 @@ export default function Home() {
     [engine],
   );
 
+  /**
+   * 큰 버튼: 지문이 있으면 판매용 5종 세트를 제작실(검증된 제작기 세션)에 맡긴다 — 사무실 직원들이 그 세션 단계를 따라 일한다.
+   * 지문이 없으면 연습 모드 하루(연출만). 브라우저 AI 초안은 판매용 PDF가 아니라서 여기서 만들지 않는다.
+   */
   const start = () => {
     if (snap.running) return;
-    if (ai === "checking") {
-      showToast("AI 연결을 확인하는 중이에요. 잠깐 뒤에 다시 눌러주세요.");
+    if (parsed.length) {
+      setView("live");
+      if (remote === "ready") {
+        productionRef.current?.start();
+        window.setTimeout(() => document.getElementById("production-room")?.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+      } else if (remote === "checking") {
+        showToast("제작실 연결을 확인하는 중이에요. 잠깐 뒤에 다시 눌러주세요.");
+      } else {
+        showToast("판매용 5종 세트는 제작실이 만들어요 — claude.ai에서 이 페이지를 열고 'Claude Code Remote' 사용을 허락해 주세요");
+        window.setTimeout(() => document.getElementById("production-room")?.scrollIntoView({ behavior: "smooth", block: "center" }), 60);
+      }
       return;
     }
-    if (ai === "ready") {
-      const short = parsed.filter((p) => p.words < 20);
-      if (!parsed.length || short.length) {
-        setView("live");
-        showToast(
-          parsed.length
-            ? `너무 짧은 지문이 있어요 (${short.map((p) => p.label).join(", ")}) — 번호 줄을 확인해주세요`
-            : "작업 지시서에 전 지문을 붙여넣어 주세요",
-        );
-        window.setTimeout(() => {
-          document.getElementById("work-order")?.scrollIntoView({ behavior: "smooth", block: "center" });
-          document.getElementById("order-passage")?.focus();
-        }, 60);
-        return;
-      }
-      // AI 사용 허락은 버튼을 누른 지금 묻는다 (일하던 도중에 갑자기 뜨지 않게)
-      void getPermissions()
-        .then((permissions) => permissions?.request(["sample"]))
-        .catch(() => undefined);
-      engine.start(new WorkJob({ ...order }, parsed, sampleRef.current, storeRef.current));
-      showToast(`07:00 — AI 직원 ${HEADCOUNT}명이 출근해서 지문 ${parsed.length}개 5종 세트를 만듭니다 ✨`);
-    } else {
-      engine.start(null);
-      showToast("연습 모드로 출근합니다 — 이 화면에선 실제 자료는 만들어지지 않아요");
-    }
+    engine.start(null);
+    showToast("연습 모드로 출근합니다 — 지문을 넣지 않아서 자료는 만들지 않아요");
     setBriefing(false);
     setView("live");
   };
@@ -476,8 +467,17 @@ export default function Home() {
             onOpenDoc={(ref) => snap.job && setDoc({ runId: snap.job.id, ref })}
             onOpenSet={() => snap.job && setOpenSet({ id: snap.job.id, data: null })}
             onStopWork={() => engine.job?.cancel()}
+            remote={remote}
             production={
-              <ProductionRoom remote={remote} mcp={mcp} store={prodStore} order={order} parsed={parsed} onActivity={onProduction} />
+              <ProductionRoom
+                ref={productionRef}
+                remote={remote}
+                mcp={mcp}
+                store={prodStore}
+                order={order}
+                parsed={parsed}
+                onActivity={onProduction}
+              />
             }
           />
         ) : (
@@ -614,6 +614,7 @@ function LiveView({
   onOpenSet,
   onStopWork,
   production,
+  remote,
 }: {
   engine: Company;
   snap: Snapshot;
@@ -634,6 +635,7 @@ function LiveView({
   onOpenSet: () => void;
   onStopWork: () => void;
   production: ReactNode;
+  remote: RemoteState;
 }) {
   const pick = pickFor(snap.job);
   const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
@@ -659,7 +661,13 @@ function LiveView({
 
       <section className="live-bar">
         <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
-          {snap.running ? "직원들이 일하는 중…" : snap.dayComplete ? "다시 출근시키기" : "오늘 업무 시작하기"}
+          {snap.running
+            ? "직원들이 일하는 중…"
+            : parsed.length
+              ? `🏭 지문 ${parsed.length}개 5종 세트 제작 맡기기`
+              : snap.dayComplete
+                ? "다시 출근시키기"
+                : "오늘 업무 시작하기 (연습)"}
         </button>
         <button className="btn btn-ghost" onClick={() => engine.togglePause()}>
           {snap.paused ? "▶ 재생" : "⏸ 일시정지"}
@@ -716,7 +724,7 @@ function LiveView({
         </div>
       </section>
 
-      <WorkOrder order={order} setOrder={setOrder} parsed={parsed} ai={ai} locked={snap.running} />
+      <WorkOrder order={order} setOrder={setOrder} parsed={parsed} remote={remote} locked={snap.running} />
 
       {production}
 
@@ -1358,6 +1366,7 @@ function DashboardView({
             <div>
               <p className="eyebrow">RECENT OUTPUTS</p>
               <h2>결과물 창고</h2>
+              <p className="storage-note">브라우저 AI가 쓴 초안이에요 — 판매용 PDF가 아니에요. 판매 파일은 라이브 오피스의 제작실이 만들어요.</p>
             </div>
             {STORAGE_LINK ? (
               <a className="btn btn-small" href={STORAGE_LINK} target="_blank" rel="noreferrer">

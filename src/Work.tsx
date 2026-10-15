@@ -131,17 +131,17 @@ export function WorkOrder({
   order,
   setOrder,
   parsed,
-  ai,
+  remote,
   locked,
 }: {
   order: OrderInput;
   setOrder: (next: OrderInput) => void;
   parsed: Passage[];
-  ai: AiState;
+  /** 제작실(검증된 제작기 세션) 연결 상태 */
+  remote: "checking" | "ready" | "off";
   locked: boolean;
 }) {
   const set = (patch: Partial<OrderInput>) => setOrder({ ...order, ...patch });
-  const est = estimate(parsed.length, Boolean(order.memo.trim()));
   const short = parsed.filter((p) => p.words < 30);
   const dropped = parsed.reduce((sum, p) => sum + p.dropped, 0);
 
@@ -150,11 +150,7 @@ export function WorkOrder({
       <section className="win work-order compact" id="work-order">
         <div className="win-body">
           <b>📝 오늘 작업</b>
-          <span>
-            {ai === "ready"
-              ? `${[order.exam, order.grade].filter(Boolean).join(" · ")} · 지문 ${parsed.length}개 · 5종`
-              : "연습 모드 — 실제 자료는 만들지 않아요"}
-          </span>
+          <span>연습 모드 — 실제 자료는 만들지 않아요</span>
           <small>업무가 끝나면 새 지문을 넣을 수 있어요</small>
         </div>
       </section>
@@ -168,19 +164,19 @@ export function WorkOrder({
         <span className="window-controls">—　▢　✕</span>
       </div>
       <div className="win-body">
-        <div className={`ai-note ${ai}`}>
-          {ai === "ready" ? (
+        <div className={`ai-note ${remote}`}>
+          {remote === "ready" ? (
             <>
-              <b>실제 작업 모드</b> 전 지문을 붙여넣고 업무를 시작하면, 직원들이 지문마다 5종 초안과 검수 보고서,
-              상세페이지 문구·카페 홍보글을 실제로 써요(대표님의 Claude 사용량). 판매 파일 드라이브에 올라가는 PDF는
-              아래 제작실의 검증된 제작기가 만들어요.
+              <b>판매용 제작</b> 시험·교재와 전 지문을 붙여넣고 위쪽 <b>‘5종 세트 제작 맡기기’</b>를 누르면, 제작실이
+              검증된 제작기로 판매하는 그 양식 그대로(분석지·핵심 어휘·어휘 테스트·워크북·변형문제 20제·서술형 + 정답) 지문별
+              PDF와 전 지문 통합 PDF를 만들어요. 진행·교체 확인·승인은 아래 제작실 창에서 해요(대표님의 Claude 사용량).
             </>
-          ) : ai === "checking" ? (
-            <b>AI 연결 확인 중…</b>
+          ) : remote === "checking" ? (
+            <b>제작실 연결 확인 중…</b>
           ) : (
             <>
-              <b>연습 모드</b> 이 화면에선 AI를 부를 수 없어서 연출만 돌아가요. Claude에서 이 페이지를 열면 실제로
-              자료를 만들어요.
+              <b>제작실 꺼짐</b> 이 화면에선 제작 세션을 열 수 없어서 판매용 PDF를 만들 수 없어요. claude.ai에서 이 페이지를
+              열고 ‘Claude Code Remote’ 사용을 허락하면 만들 수 있어요. 지문 없이 시작하면 연습 모드(연출만)로 돌아요.
             </>
           )}
         </div>
@@ -218,7 +214,7 @@ export function WorkOrder({
         {parsed.length ? (
           <div className="parsed">
             <p>
-              <b>지문 {parsed.length}개 인식</b> · AI 작업 약 {est.calls}번 · 예상 {est.min}~{est.max}분
+              <b>지문 {parsed.length}개 인식</b>
               {dropped ? ` · 한글·선택지 줄 ${dropped}개는 지문이 아니라서 뺐어요` : ""}
             </p>
             <div className="parsed-chips">
@@ -252,7 +248,7 @@ export function WorkOrder({
           <button className="text-button" onClick={() => setOrder({ exam: "", grade: order.grade, passages: "", memo: "" })}>
             비우기
           </button>
-          <span className="order-hint">위쪽 ‘오늘 업무 시작하기’를 누르면 출근합니다.</span>
+          <span className="order-hint">위쪽 ‘5종 세트 제작 맡기기’를 누르면 제작실에 맡겨요.</span>
         </div>
       </div>
     </section>

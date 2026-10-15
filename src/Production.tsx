@@ -1,5 +1,5 @@
 // 제작실 — 판매용 5종 세트를 검증된 제작기(Claude Code 세션)에 맡기고, 지켜보고, 승인하는 창
-import { useCallback, useEffect, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import { mcpErrorText, type Mcp } from "./ai/claude";
 import type { OrderInput } from "./ai/job";
 import type { Passage } from "./ai/passages";
@@ -26,6 +26,8 @@ import type { ProductionStage, ProductionView } from "./game/sim";
 import { MarkdownView } from "./Work";
 
 export type RemoteState = "checking" | "ready" | "off";
+/** 사무실 큰 버튼('5종 세트 제작 맡기기')이 제작실의 맡기기를 부른다 */
+export type ProductionHandle = { start: () => void };
 
 const ENV_KEY = "verru-production-env";
 
@@ -253,14 +255,7 @@ function ProductionRow({
   );
 }
 
-export function ProductionRoom({
-  remote,
-  mcp,
-  store,
-  order,
-  parsed,
-  onActivity,
-}: {
+type RoomProps = {
   remote: RemoteState;
   mcp: Mcp | null;
   store: ProductionStore | null;
@@ -268,7 +263,12 @@ export function ProductionRoom({
   parsed: Passage[];
   /** 사무실 직원들이 따라 움직일 제작 세션(가장 최근의 진행 중인 것) */
   onActivity?: (view: ProductionView | null) => void;
-}) {
+};
+
+export const ProductionRoom = forwardRef<ProductionHandle, RoomProps>(function ProductionRoom(
+  { remote, mcp, store, order, parsed, onActivity },
+  ref,
+) {
   const [list, setList] = useState<Production[]>([]);
   const [views, setViews] = useState<Record<string, ProductionView>>({});
   const [envs, setEnvs] = useState<Environment[] | null>(null);
@@ -331,17 +331,41 @@ export function ProductionRoom({
   };
 
   const start = async () => {
-    if (!mcp || !envId) return;
+    if (!mcp || busy) return;
+    if (problems.length) {
+      setError(problems[0]);
+      document.getElementById("production-room")?.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
+    let env = envId;
+    if (!env || !envs) {   // 처음이면 실행 환경부터 불러온다(이때 커넥터 사용 허락을 한 번 묻는다)
+      setBusy("env");
+      try {
+        const found = await listEnvironments(mcp);
+        setEnvs(found);
+        env = found.some((e) => e.id === envId) ? envId : (found[0]?.id ?? "");
+        setEnvId(env);
+      } catch (e) {
+        setError(mcpErrorText(e, REMOTE));
+        return;
+      } finally {
+        setBusy("");
+      }
+      if (!env) {
+        setError("실행 환경이 없어요. claude.ai/code 에서 환경을 하나 만들어 주세요.");
+        return;
+      }
+    }
     if (!window.confirm(`sets/${name} 로 지문 ${parsed.length}개의 5종 세트 제작을 시작할까요?\n\n제작 세션이 새로 열리고 대표님의 Claude 사용량을 써요.`)) return;
     setBusy("start");
     setError("");
     try {
-      localStorage.setItem(ENV_KEY, envId);
+      localStorage.setItem(ENV_KEY, env);
     } catch {
       // 환경 기억은 편의 기능
     }
     try {
-      const prod = await startProduction(mcp, { set: name, exam: order.exam.trim(), grade: order.grade, passages: parsed, envId });
+      const prod = await startProduction(mcp, { set: name, exam: order.exam.trim(), grade: order.grade, passages: parsed, envId: env });
       save(prod);
     } catch (e) {
       const code = (e as { code?: string })?.code;
@@ -366,8 +390,9 @@ export function ProductionRoom({
     !parsed.length && "작업 지시서에 전 지문을 붙여넣어 주세요",
     !validSetName(name) && "묶음 폴더 이름은 영어 소문자·숫자·- 로 (예: 2026-10-g2)",
     duplicate && "같은 묶음 폴더로 진행 중인 제작이 있어요 — 아래 목록에서 이어서 보세요",
-    !envId && "실행 환경을 골라 주세요",
   ].filter(Boolean) as string[];
+
+  useImperativeHandle(ref, () => ({ start: () => void start() }));
 
   return (
     <section className="win production-room" id="production-room">
@@ -427,7 +452,7 @@ export function ProductionRoom({
               </label>
             </div>
             <div className="order-actions">
-              <button className="btn" onClick={start} disabled={busy !== "" || problems.length > 0}>
+              <button className="btn" onClick={() => void start()} disabled={busy !== "" || problems.length > 0}>
                 {busy === "start" ? "세션 여는 중…" : `🏭 지문 ${parsed.length}개 5종 세트 제작 맡기기`}
               </button>
               <span className="order-hint">
@@ -492,4 +517,4 @@ export function ProductionRoom({
       ) : null}
     </section>
   );
-}
+});
