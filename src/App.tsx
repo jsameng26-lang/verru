@@ -61,6 +61,8 @@ export default function Home() {
   const [filter, setFilter] = useState<"전체" | DeptStatus>("전체");
   const [toast, setToast] = useState("");
   const [copied, setCopied] = useState(false);
+  /** 클립보드 복사가 막힌 환경(일부 앱 화면)에서 직접 복사하도록 보여줄 브리핑 */
+  const [manualCopy, setManualCopy] = useState<string | null>(null);
   const publishedRef = useRef(false);
 
   useEffect(() => {
@@ -101,13 +103,14 @@ export default function Home() {
         engine.pushLog("📋", "오늘 브리핑 정리 완료 — ‘📤 보고 복사’를 누르면 텍스트로 복사돼요", "mint");
         return;
       }
+      const text = reportToText(buildReport(engine.snapshot()));
       try {
-        await navigator.clipboard.writeText(reportToText(buildReport(engine.snapshot())));
+        await navigator.clipboard.writeText(text);
         setCopied(true);
         engine.pushLog("📤", "오늘 브리핑을 클립보드에 복사했어요", "mint");
         showToast("브리핑 복사 완료 — 카톡·노션 어디든 붙여넣으세요");
       } catch {
-        showToast("복사 실패 — 브라우저의 클립보드 권한을 확인해주세요");
+        setManualCopy(text);
       }
     },
     [engine, showToast],
@@ -247,6 +250,7 @@ export default function Home() {
         />
       ) : null}
       {briefing ? <BriefingModal snap={snap} onClose={() => setBriefing(false)} /> : null}
+      {manualCopy !== null ? <CopyModal text={manualCopy} onClose={() => setManualCopy(null)} /> : null}
       <div className={`toast ${toast ? "show" : ""}`} role="status">
         {toast}
       </div>
@@ -640,6 +644,42 @@ function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void 
           </div>
           <button className="btn btn-primary" onClick={onClose}>
             확인
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CopyModal({ text, onClose }: { text: string; onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <section
+        className="win team-modal"
+        onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="브리핑 직접 복사"
+      >
+        <div className="win-bar">
+          <span>📤 briefing.txt</span>
+          <button className="window-close" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        <div className="win-body">
+          <p className="brief-date">이 화면에서는 자동 복사가 막혀 있어요</p>
+          <h3>아래 글을 길게 눌러 전체 선택 → 복사하세요.</h3>
+          <textarea
+            id="briefing-copy"
+            className="copy-box"
+            readOnly
+            value={text}
+            onFocus={(event) => event.currentTarget.select()}
+            autoFocus
+          />
+          <button className="btn btn-primary" onClick={onClose}>
+            닫기
           </button>
         </div>
       </section>

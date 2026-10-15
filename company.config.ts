@@ -25,7 +25,7 @@ export const COMPANY = {
   /** 화면 상단 큰 제목 (강조되는 뒷부분) */
   titleAccent: "AI Office",
   /** 브라우저 탭 제목 */
-  pageTitle: "베르영어 AI Office — 영어 수업자료 제작 사무실",
+  pageTitle: "베르영어 AI Office",
   /** 검색·공유될 때 뜨는 설명 */
   description: "분석지·단어장·워크북·변형문제·서술형 대비 자료를 기획부터 제작·검수·판매까지 돌리는 베르영어 AI 오피스",
   /** 창 하단 파일명 느낌의 라벨 */
