@@ -105,3 +105,51 @@ export function sampleErrorText(code: string): string {
       return "AI 연결이 잠깐 끊겼어요. '다시 만들기'를 눌러주세요.";
   }
 }
+
+// ── 커넥터(mcp) — 제작실이 Claude Code 세션을 열고 지켜보는 데 쓴다 ──
+export type McpError = { code: string; message?: string; retryable?: boolean; result?: unknown };
+export type McpResult = { payload?: unknown; cache?: { storedAt: number; revalidating: boolean } };
+export type McpWatchEvent = { type: "data"; result: McpResult } | { type: "error"; error: McpError };
+export type Mcp = {
+  callTool(server: string, tool: string, input?: unknown, options?: { cache?: false }): Promise<McpResult>;
+  watchTool(
+    server: string,
+    tool: string,
+    input: unknown,
+    handler: (ev: McpWatchEvent) => void,
+    options?: { cache?: { staleTime?: number; gcTime?: number }; refetchInterval?: number },
+  ): () => void;
+  invalidate(server?: string, tool?: string, input?: unknown): Promise<void>;
+  listTools(server?: string): Promise<{ servers: { server: string; authStatus: string; tools: { name: string }[] }[] }>;
+};
+
+export const getMcp = () => use<Mcp>("mcp");
+
+/** 커넥터 실패 코드 → 대표님께 보여줄 문장 */
+export function mcpErrorText(e: unknown, server: string): string {
+  const err = (e ?? {}) as McpError;
+  switch (err.code) {
+    case "needs_reauth":
+      return `${server} 연결이 만료됐어요. claude.ai 설정 → 커넥터에서 다시 연결해 주세요.`;
+    case "server_not_connected":
+    case "server_not_found":
+      return `${server} 커넥터가 없어요. claude.ai 설정 → 커넥터에서 추가해 주세요.`;
+    case "selection_required":
+      return `${server} 커넥터가 여러 개예요. 화면에 뜬 선택 창에서 하나를 골라 주세요.`;
+    case "not_in_manifest":
+    case "approval_required":
+    case "not_granted":
+      return `이 페이지에 ${server} 사용을 허락하지 않았어요. 페이지의 권한 메뉴에서 켜 주세요.`;
+    case "blocked_by_policy":
+      return `조직 정책으로 ${server}를 쓸 수 없어요.`;
+    case "capability_disabled":
+    case "capability_removed":
+      return "이 화면에서는 커넥터를 쓸 수 없어요. claude.ai에서 페이지를 다시 열어 주세요.";
+    case "server_unavailable":
+      return `${server}가 잠깐 응답하지 않아요. 조금 뒤 새로고침해 주세요.`;
+    case "tool_error":
+      return `${server}가 거절했어요: ${String(err.message ?? "").slice(0, 300)}`;
+    default:
+      return `${server} 연결 중 문제가 생겼어요 (${err.code ?? "알 수 없음"}).`;
+  }
+}

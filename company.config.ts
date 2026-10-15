@@ -44,6 +44,18 @@ export const LINKS: { name: string; href: string }[] = [
 /** 결과물 창고의 "사이트 열기" 버튼 링크. 비워두면 버튼이 숨겨집니다. */
 export const STORAGE_LINK = "https://verrueng9875.com";
 
+/**
+ * 제작실 — 판매용 5종 세트를 실제로 만드는 곳(검증된 제작기 저장소의 Claude Code 세션).
+ * 사무실 페이지가 세션을 열어 /make-set 을 맡기고, 진행 상황을 보여 주고, 대표 승인을 전달합니다.
+ * 주소·브랜치는 비밀이 아니에요(저장소 접근은 GitHub 권한으로 막혀 있음). 비밀값은 Claude 환경 설정에만.
+ */
+export const PRODUCTION = {
+  /** 제작기 저장소 (비공개) */
+  repo: "https://github.com/jsameng26-lang/jsameng",
+  /** 제작 세션이 데이터를 올릴 브랜치 — 홈페이지가 배포되는 작업 브랜치 */
+  branch: "claude/clever-cannon-gcssc1",
+};
+
 /** 대표(나) — 사무실 대표실에 앉아 있는 캐릭터 */
 export const CEO_PROFILE = {
   name: "베르 대표",

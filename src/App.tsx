@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import OfficeWorld from "./game/OfficeWorld";
 import { buildReport, reportToText } from "./game/report";
@@ -6,10 +6,12 @@ import { Company, PHASES, type Agent, type DeptStatus, type Snapshot } from "./g
 import { BLOCK_NEED, CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { LINK_ROWS } from "./links";
-import { getDb, getDownloads, getPermissions, getSample, inClaude, type Downloads, type SampleFn } from "./ai/claude";
+import { getDb, getDownloads, getMcp, getPermissions, getSample, inClaude, type Downloads, type Mcp, type SampleFn } from "./ai/claude";
 import { GLOBAL_ORDER, PART_ORDER, SALE_PARTS, WorkJob, fileNameFor, type OrderInput, type RunData } from "./ai/job";
 import { parsePassages } from "./ai/passages";
 import { RunStore, summarize, type RunSummary } from "./ai/store";
+import { ProductionStore, REMOTE } from "./ai/remote";
+import { ProductionRoom, type RemoteState } from "./Production";
 import { DocModal, OutputsPanel, SetModal, WorkOrder, estimate, saleReadyCount, type AiState, type DocRef } from "./Work";
 import { COMPANY, STORAGE_LINK, TODAY_PICK } from "../company.config";
 
@@ -125,13 +127,30 @@ export default function Home() {
   const sampleRef = useRef<SampleFn | null>(null);
   const downloadsRef = useRef<Downloads | null>(null);
   const storeRef = useRef<RunStore | null>(null);
+  // ── 제작실: 검증된 제작기 세션 ──
+  const [remote, setRemote] = useState<RemoteState>("checking");
+  const [mcp, setMcp] = useState<Mcp | null>(null);
+  const [prodStore, setProdStore] = useState<ProductionStore | null>(null);
 
   useEffect(() => {
     let alive = true;
     let unsubscribe = () => {};
     void (async () => {
-      const [sample, db, downloads] = await Promise.all([getSample(), getDb(), getDownloads()]);
+      const [sample, db, downloads, connectors] = await Promise.all([getSample(), getDb(), getDownloads(), getMcp()]);
       if (!alive) return;
+      if (db) setProdStore(new ProductionStore(db));
+      if (connectors) {
+        // 목록 보기는 허락을 묻지 않는다. 커넥터가 없으면 목록에서 빠진다
+        connectors
+          .listTools(REMOTE)
+          .then((res) => {
+            if (!alive) return;
+            const ok = res.servers.some((s) => s.server === REMOTE);
+            setMcp(ok ? connectors : null);
+            setRemote(ok ? "ready" : "off");
+          })
+          .catch(() => alive && setRemote("off"));
+      } else setRemote("off");
       sampleRef.current = sample;
       downloadsRef.current = downloads;
       setAi(sample ? "ready" : "off");
@@ -455,6 +474,7 @@ export default function Home() {
             onOpenDoc={(ref) => snap.job && setDoc({ runId: snap.job.id, ref })}
             onOpenSet={() => snap.job && setOpenSet({ id: snap.job.id, data: null })}
             onStopWork={() => engine.job?.cancel()}
+            production={<ProductionRoom remote={remote} mcp={mcp} store={prodStore} order={order} parsed={parsed} />}
           />
         ) : (
           <DashboardView
@@ -589,6 +609,7 @@ function LiveView({
   onOpenDoc,
   onOpenSet,
   onStopWork,
+  production,
 }: {
   engine: Company;
   snap: Snapshot;
@@ -608,6 +629,7 @@ function LiveView({
   onOpenDoc: (ref: DocRef) => void;
   onOpenSet: () => void;
   onStopWork: () => void;
+  production: ReactNode;
 }) {
   const pick = pickFor(snap.job);
   const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
@@ -688,6 +710,8 @@ function LiveView({
       </section>
 
       <WorkOrder order={order} setOrder={setOrder} parsed={parsed} ai={ai} locked={snap.running} />
+
+      {production}
 
       <section className="live-grid">
         <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow={follow} onSelect={onSelect} />

@@ -20,8 +20,13 @@ Vite + React + TypeScript, 서버 없음.
 
 ## 실제 작업 모드
 
-Claude 아티팩트로 게시하면 `sample`(AI 호출) · `db`(결과물 창고, `runs` 컬렉션) · `downloads`(.docx 저장)를 쓴다.
-게시할 때 capabilities: `{ sample: {}, db: { rules: [{ path: "runs", read: "admin", write: "admin" }] }, downloads: true }`.
+Claude 아티팩트로 게시하면 `sample`(AI 호출) · `db`(결과물 창고 `runs`, 제작실 기록 `prod`) · `downloads`(.docx 저장) ·
+`mcp`(제작실: Claude Code Remote 커넥터)를 쓴다. 게시할 때 capabilities:
+`{ sample: {}, db: { rules: [{ path: "runs", read: "admin", write: "admin" }, { path: "prod", read: "admin", write: "admin" }] }, downloads: true, mcp: { servers: [{ server: "Claude Code Remote", tools: ["list_environments", "create_session", "get_session", "list_events", "send_message"] }] } }`.
+
+판매용 PDF는 **제작실**(`src/Production.tsx`, `src/ai/remote.ts`)이 만든다: 제작기 저장소(`company.config.ts`의 `PRODUCTION`)에
+Claude Code 세션을 열어 `/make-set` 1~4단계를 맡기고, 대표가 보고를 보고 '승인 → 판매 등록'을 누르면 확인 코드가 든
+승인 메시지를 보내 5단계(드라이브 업로드)를 진행시킨다. 세션을 자동으로 다시 열거나 승인을 자동으로 다시 보내지 않는다.
 게시 파일: 페이지 + `assets/*`(해시 이름 그대로, 청크끼리 서로 import) + `fonts/*`(PDF 글꼴, 라이선스 포함).
 번들은 `esbuild.charset: "ascii"` 로 만든다 (docx 라이브러리의 U+FFFD 때문에 게시가 거부됨).
 팀별 프롬프트는 `src/ai/prompts.ts`, 작업 흐름은 `src/ai/job.ts` + `src/game/sim.ts` 의 dayScript.

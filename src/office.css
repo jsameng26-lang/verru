@@ -660,3 +660,30 @@
 @media (max-width: 680px) {
   .order-grid.two { grid-template-columns: 1fr; }
 }
+
+/* 제작실 (검증된 제작기 세션) */
+.production-room { margin-bottom: 14px; }
+.production-room label { display: grid; gap: 5px; min-width: 0; }
+.production-room label > span { color: var(--ink-soft); font-size: 11px; font-weight: 900; }
+.production-room label > span small { margin-left: 6px; color: var(--ink-faint); font-weight: 700; }
+.production-room input, .production-room select, .production-room textarea {
+  width: 100%; min-width: 0; padding: 8px 10px; border: 1.5px solid var(--ink); border-radius: 8px;
+  background: #fff; color: var(--ink); font: inherit; font-size: 13px;
+}
+.production-room textarea { line-height: 1.6; resize: vertical; }
+.production-room :is(input, select, textarea):focus-visible { outline: 3px solid rgba(255, 95, 168, .35); outline-offset: 2px; }
+.production-room .order-grid { margin-bottom: 12px; }
+.prod-list { display: grid; gap: 10px; margin: 14px 0 0; padding: 0; list-style: none; }
+.prod-row { padding: 10px 12px; border: 1.5px solid var(--ink); border-radius: 10px; background: #fff; }
+.prod-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.prod-head b { font-size: 14px; overflow-wrap: anywhere; }
+.prod-head small { color: var(--ink-faint); font-size: 11px; }
+.prod-head .mini-open { margin-left: auto; text-decoration: none; }
+.prod-summary { margin: 6px 0 0; color: var(--ink-soft); font-size: 12px; line-height: 1.5; }
+.prod-error { margin: 8px 0 0; color: #c2185b; font-size: 12px; line-height: 1.5; }
+.prod-hint { margin: 8px 0 0; color: var(--ink-faint); font-size: 12px; line-height: 1.5; }
+.prod-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; }
+.prod-approved { color: var(--ink-soft); font-size: 12px; font-weight: 800; }
+.prod-approve { margin-top: 10px; padding: 10px; border: 1.5px dashed var(--pink-line); border-radius: 10px; background: #fff8fc; }
+.prod-approve p { margin: 0 0 8px; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.prod-setup { margin: 8px 0 0; padding-left: 20px; color: var(--ink-soft); font-size: 12px; line-height: 1.7; }
