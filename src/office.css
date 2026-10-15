@@ -630,3 +630,33 @@
 .work-order.compact .win-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 16px; font-size: 13px; }
 .work-order.compact span { min-width: 0; overflow-wrap: anywhere; }
 .work-order.compact small { margin-left: auto; color: var(--ink-faint); font-size: 11px; }
+
+/* ── 전 지문 일괄 제작 ───────────────────────────────────── */
+.order-grid.two { grid-template-columns: minmax(0, 3fr) minmax(0, 1fr); }
+.work-order .order-passage textarea { min-height: 200px; }
+.parsed { margin-top: 10px; padding: 10px 12px; border: 1.5px solid var(--pink-line); border-radius: 10px; background: #fffafd; }
+.parsed p { margin: 0 0 8px; color: var(--ink-soft); font-size: 12px; }
+.parsed p b { color: var(--ink); }
+.parsed-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.parsed-chips span { padding: 3px 9px; border: 1.5px solid var(--ink); border-radius: 999px; background: var(--mint); font-size: 11px; font-weight: 900; }
+.parsed-chips span.warn { background: var(--yellow); }
+.parsed-chips small { margin-left: 3px; color: var(--ink-soft); font-weight: 700; }
+.parsed .parsed-warn { margin: 8px 0 0; color: #a3366b; }
+.set-modal { width: min(900px, 100%); }
+.set-modal h4 { margin: 16px 0 8px; font-size: 13px; }
+.set-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.set-table th, .set-table td { padding: 5px 6px; border-bottom: 1px dashed var(--pink-line); text-align: center; white-space: nowrap; }
+.set-table thead th { background: var(--pink-bg); font-size: 11px; }
+.set-table tbody th { text-align: left; }
+.cell-chip { width: 30px; height: 26px; border: 1.5px solid var(--ink); border-radius: 7px; background: var(--win); color: var(--ink); font-weight: 900; cursor: pointer; }
+.cell-chip.done { background: var(--mint); }
+.cell-chip.working { background: var(--yellow); }
+.cell-chip.blocked { background: #ffd6e6; }
+.cell-chip:disabled { border-color: var(--pink-line); color: var(--ink-faint); cursor: default; }
+.set-legend { margin: 6px 0 0; }
+.drive-note { margin: 14px 0 0; padding: 10px 12px; border: 1.5px dashed var(--lav); border-radius: 10px; background: #f8f4ff; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.drive-note b { display: block; color: var(--ink); }
+.outputs-card .btn-small { width: 100%; }
+@media (max-width: 680px) {
+  .order-grid.two { grid-template-columns: 1fr; }
+}

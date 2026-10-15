@@ -1,8 +1,10 @@
-// 지문 하나로 5종 세트 + 검수 + 상세페이지·홍보글 + 등록 정보를 실제로 만드는 작업 단위.
-// 사무실 시뮬레이션(sim.ts)이 단계마다 run()을 부르고, 직원들은 결과가 나올 때까지 자리에서 일한다.
+// 전 지문 5종 세트를 실제로 만드는 작업 단위.
+// 지문마다 분석지·단어장·워크북·변형문제·서술형 + 검수를 만들고, 세트 전체로 기획·상세페이지·홍보글·등록 정보·브리핑을 만든다.
+// 사무실 시뮬레이션(sim.ts)이 단계마다 일을 맡기고, 직원들은 결과가 나올 때까지 자리에서 일한다.
 import { BLOCK_NEED, DEPT_LEAD } from "../game/staff";
 import { roomOf } from "../game/world";
 import { sampleErrorText, type SampleError, type SampleFn } from "./claude";
+import type { Passage } from "./passages";
 import {
   analysisPrompt,
   demandPrompt,
@@ -15,93 +17,124 @@ import {
   workbookPrompt,
   writingPrompt,
   type Plan,
+  type SetInfo,
   type WorkInput,
 } from "./prompts";
 
-export type SectionId =
-  | "demand"
-  | "plan"
-  | "analysis"
-  | "vocab"
-  | "workbook"
-  | "variants"
-  | "writing"
-  | "qa"
-  | "detail"
-  | "promo"
-  | "listing"
-  | "briefing";
+export type OrderInput = { exam: string; grade: string; passages: string; memo: string };
 
+export type GlobalId = "demand" | "plan" | "detail" | "promo" | "listing" | "briefing";
+export type PartId = "analysis" | "vocab" | "workbook" | "variants" | "writing" | "qa";
 export type SectionStatus = "idle" | "running" | "done" | "failed" | "skipped";
 
-export type Section = {
-  id: SectionId;
-  status: SectionStatus;
-  text: string;
-  error: string;
-  truncated: boolean;
+export type Section = { status: SectionStatus; text: string; error: string; truncated: boolean };
+
+type Tier = "quick" | "default" | "complex";
+type Meta = { dept: string; title: string; expected: number; tier: Tier };
+type Answer = { text: string; truncated: boolean };
+
+export const GLOBAL_META: Record<GlobalId, Meta> = {
+  demand: { dept: "research", title: "수요 메모 정리", expected: 700, tier: "quick" },
+  plan: { dept: "strategy1", title: "제작 계획", expected: 1500, tier: "default" },
+  detail: { dept: "review", title: "상세페이지 문구", expected: 1800, tier: "default" },
+  promo: { dept: "partner", title: "카페·블로그 홍보글", expected: 2400, tier: "default" },
+  listing: { dept: "ops", title: "상품 등록 정보", expected: 1, tier: "quick" },
+  briefing: { dept: "secretary", title: "비서실 브리핑", expected: 1, tier: "quick" },
 };
 
-type Meta = {
-  dept: string;
-  title: string;
-  /** 판매용 자료(세트 .docx에 들어감) */
-  sale: boolean;
-  /** 진행률 계산용 예상 글자 수 */
-  expected: number;
-  tier: "quick" | "default" | "complex";
+export const PART_META: Record<PartId, Meta> = {
+  analysis: { dept: "strategy2", title: "분석지", expected: 5000, tier: "default" },
+  vocab: { dept: "strategy2", title: "단어장", expected: 2600, tier: "default" },
+  workbook: { dept: "reels", title: "워크북", expected: 4500, tier: "default" },
+  variants: { dept: "reels", title: "변형문제", expected: 5000, tier: "complex" },
+  writing: { dept: "carousel", title: "서술형 대비", expected: 2600, tier: "default" },
+  qa: { dept: "qa", title: "검수 보고서", expected: 2200, tier: "complex" },
 };
 
-export const SECTION_META: Record<SectionId, Meta> = {
-  demand: { dept: "research", title: "수요 메모 정리", sale: false, expected: 700, tier: "quick" },
-  plan: { dept: "strategy1", title: "제작 계획", sale: false, expected: 700, tier: "default" },
-  analysis: { dept: "strategy2", title: "분석지", sale: true, expected: 5000, tier: "default" },
-  vocab: { dept: "strategy2", title: "단어장", sale: true, expected: 2600, tier: "default" },
-  workbook: { dept: "reels", title: "워크북", sale: true, expected: 4500, tier: "default" },
-  variants: { dept: "reels", title: "변형문제", sale: true, expected: 5000, tier: "complex" },
-  writing: { dept: "carousel", title: "서술형 대비", sale: true, expected: 2600, tier: "default" },
-  qa: { dept: "qa", title: "검수 보고서", sale: false, expected: 2200, tier: "complex" },
-  detail: { dept: "review", title: "상세페이지 문구", sale: false, expected: 1800, tier: "default" },
-  promo: { dept: "partner", title: "카페·블로그 홍보글", sale: false, expected: 2400, tier: "default" },
-  listing: { dept: "ops", title: "상품 등록 정보", sale: false, expected: 1, tier: "quick" },
-  briefing: { dept: "secretary", title: "비서실 브리핑", sale: false, expected: 1, tier: "quick" },
-};
+export const GLOBAL_ORDER: GlobalId[] = ["demand", "plan", "detail", "promo", "listing", "briefing"];
+export const PART_ORDER: PartId[] = ["analysis", "vocab", "workbook", "variants", "writing", "qa"];
+/** 고객에게 파는 5종 (PDF에 들어가는 순서) */
+export const SALE_PARTS: PartId[] = ["analysis", "vocab", "workbook", "variants", "writing"];
 
-export const SECTION_ORDER: SectionId[] = [
-  "demand",
-  "plan",
-  "analysis",
-  "vocab",
-  "workbook",
-  "variants",
-  "writing",
-  "qa",
-  "detail",
-  "promo",
-  "listing",
-  "briefing",
-];
+export type PassageData = { key: string; label: string; text: string; parts: Record<PartId, Section> };
 
-export const SALE_SECTIONS: SectionId[] = SECTION_ORDER.filter((id) => SECTION_META[id].sale);
-
-/** 저장소·화면에 넘기는 작업 상태 (읽기 전용 사본) */
 export type RunData = {
+  version: 2;
   id: string;
   createdAt: number;
-  input: WorkInput;
+  order: OrderInput;
   plan: Plan | null;
   productName: string;
-  sections: Record<SectionId, Section>;
-  /** 시트에 붙여넣을 한 줄 (탭 구분) */
+  global: Record<GlobalId, Section>;
+  passages: PassageData[];
+  /** AI 사용이 막혀 중간에 멈췄으면 그 이유 */
+  halted: string;
   sheetRow: string;
 };
 
-export type RunSaver = (run: RunData) => void;
+export type RunSaver = {
+  saveRun(run: RunData): void;
+  savePassage(runId: string, passage: PassageData): void;
+};
 
-function emptySections(): Record<SectionId, Section> {
-  return Object.fromEntries(
-    SECTION_ORDER.map((id) => [id, { id, status: "idle", text: "", error: "", truncated: false }]),
-  ) as Record<SectionId, Section>;
+const empty = (): Section => ({ status: "idle", text: "", error: "", truncated: false });
+const emptyParts = () => Object.fromEntries(PART_ORDER.map((id) => [id, empty()])) as Record<PartId, Section>;
+export const isSettled = (s: Section) => s.status === "done" || s.status === "failed" || s.status === "skipped";
+
+/** 다시 눌러도 바로는 소용없는 실패 — 줄을 멈추고 대표에게 알린다 */
+const HALT_CODES = new Set(["rate_limited", "not_granted", "sampling_disabled", "session_expired", "not_declared"]);
+
+export /** 줄을 멈춘 이유 — 대표에게 보여줄 문장 */
+function haltText(code: string) {
+  switch (code) {
+    case "rate_limited":
+      return "AI 사용량 한도에 걸려서 잠시 멈췄어요. 한도가 풀린 뒤(보통 몇 시간 안) 이어서 만들 수 있어요.";
+    case "not_granted":
+      return "AI 사용 허락이 꺼져 있어서 멈췄어요. 페이지 권한 메뉴에서 켜고 이어서 만들어주세요.";
+    case "session_expired":
+      return "로그인이 만료돼서 멈췄어요. 다시 로그인한 뒤 이어서 만들어주세요.";
+    default:
+      return "이 계정에선 AI 작업을 쓸 수 없어서 멈췄어요.";
+  }
+}
+
+export const slug = (s: string) => s.replace(/[^0-9A-Za-z가-힣]+/g, "").slice(0, 24) || "자료";
+
+/** 저장 파일 이름 — 예: VR_고2_2026년10월학평_18번_5종.pdf */
+export function fileNameFor(order: OrderInput, part: string, ext: "pdf" | "docx" | "zip") {
+  return `VR_${slug(order.grade)}_${slug(order.exam)}_${part}.${ext}`;
+}
+
+/** 동시에 최대 limit 개만 돌리는 줄 (AI는 한 사람당 동시에 두어 개만 받는다) */
+class Lane {
+  private active = 0;
+  private waiting: (() => void)[] = [];
+  constructor(private limit: number) {}
+  async run(task: () => Promise<void>) {
+    if (this.active >= this.limit) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.active += 1;
+    try {
+      await task();
+    } finally {
+      this.active -= 1;
+      this.waiting.shift()?.();
+    }
+  }
+}
+
+function cleanPlan(raw: unknown, labels: string[]): Plan | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  const topicsRaw = Array.isArray(r.topics) ? (r.topics as Record<string, unknown>[]) : [];
+  const plan: Plan = {
+    productName: str(r.productName),
+    difficulty: str(r.difficulty) || "중",
+    points: (Array.isArray(r.points) ? r.points.map(str).filter(Boolean) : []).slice(0, 3),
+    summary: str(r.summary),
+    topics: labels.map((label, i) => ({ label, topic: str(topicsRaw[i]?.topic) })),
+  };
+  return plan.productName ? plan : null;
 }
 
 function planToMarkdown(plan: Plan) {
@@ -111,243 +144,344 @@ function planToMarkdown(plan: Plan) {
     "| 항목 | 내용 |",
     "|---|---|",
     `| 상품명 | ${plan.productName} |`,
-    `| 주제 | ${plan.topic} |`,
-    `| 요지 | ${plan.gist} |`,
+    `| 지문 수 | ${plan.topics.length}개 |`,
     `| 난이도 | ${plan.difficulty} |`,
     "",
     "## 출제 포인트",
     ...plan.points.map((p) => `- ${p}`),
     "",
-    "## 핵심 문장",
-    ...plan.keySentences.map((s) => `- ${s}`),
-    "",
     "## 판매 포인트",
     plan.summary,
+    "",
+    "## 지문별 주제",
+    "| 지문 | 주제 |",
+    "|---|---|",
+    ...plan.topics.map((t) => `| ${t.label} | ${t.topic || "—"} |`),
   ].join("\n");
-}
-
-function cleanPlan(raw: unknown): Plan | null {
-  if (!raw || typeof raw !== "object") return null;
-  const r = raw as Record<string, unknown>;
-  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
-  const list = (v: unknown) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
-  const plan: Plan = {
-    productName: str(r.productName),
-    topic: str(r.topic),
-    gist: str(r.gist),
-    difficulty: str(r.difficulty) || "중",
-    keySentences: list(r.keySentences).slice(0, 3),
-    points: list(r.points).slice(0, 3),
-    summary: str(r.summary),
-  };
-  return plan.productName ? plan : null;
-}
-
-const slug = (s: string) => s.replace(/[^0-9A-Za-z가-힣]+/g, "").slice(0, 20) || "지문";
-
-/** 저장 파일 이름 — 예: VR_고2_2026년10월학평_18번_분석지.docx */
-export function fileNameFor(input: WorkInput, part: string) {
-  return `VR_${slug(input.grade)}_${slug(input.exam)}_${slug(input.number)}_${part}.docx`;
 }
 
 export class WorkJob {
   readonly id: string;
   readonly createdAt: number;
-  readonly input: WorkInput;
-  sections = emptySections();
+  readonly order: OrderInput;
+  readonly passages: PassageData[];
+  global = Object.fromEntries(GLOBAL_ORDER.map((id) => [id, empty()])) as Record<GlobalId, Section>;
   plan: Plan | null = null;
-  private startedAt = new Map<SectionId, number>();
-  private running = new Map<SectionId, Promise<void>>();
+  halted = "";
+  /** 이어서 만드는 세트인데 이미 제작에 들어갔던 것 — 대표 승인을 다시 묻지 않는다 */
+  readonly approvedBefore: boolean;
+  private lane = new Lane(2);
+  private running = 0;
   private controllers = new Set<AbortController>();
   private sample: SampleFn | null;
-  private save: RunSaver | null;
+  private saver: RunSaver | null;
 
-  constructor(input: WorkInput, sample: SampleFn | null, save: RunSaver | null) {
-    this.createdAt = Date.now();
-    this.id = `run-${this.createdAt}`;
-    this.input = input;
+  constructor(order: OrderInput, passages: Passage[], sample: SampleFn | null, saver: RunSaver | null, restore?: RunData) {
+    this.createdAt = restore?.createdAt ?? Date.now();
+    this.id = restore?.id ?? `run-${this.createdAt}`;
+    this.order = order;
     this.sample = sample;
-    this.save = save;
+    this.saver = saver;
+    this.passages =
+      restore?.passages.map((p) => ({ ...p, parts: { ...emptyParts(), ...p.parts } })) ??
+      passages.map((p) => ({ key: p.key, label: p.label, text: p.text, parts: emptyParts() }));
+    this.approvedBefore = Boolean(restore?.passages.some((p) => PART_ORDER.some((id) => p.parts[id].status !== "idle")));
+    if (restore) {
+      this.global = { ...this.global, ...restore.global };
+      this.plan = restore.plan;
+      // 저장될 때 '작성 중'이던 것은 끊긴 것이고, 실패한 것도 이어서 만들 때 다시 시도한다
+      const retry = (sec: Section) => sec.status === "running" || sec.status === "failed";
+      for (const id of GLOBAL_ORDER) if (retry(this.global[id])) this.global[id] = empty();
+      for (const p of this.passages) for (const id of PART_ORDER) if (retry(p.parts[id])) p.parts[id] = empty();
+    }
+  }
+
+  /** 저장된 세트를 이어서 만들 때 */
+  static restore(run: RunData, sample: SampleFn | null, saver: RunSaver | null) {
+    return new WorkJob(run.order, [], sample, saver, run);
+  }
+
+  /** 이 세트에 AI 작업이 몇 번 필요한지 (대표 안내용) */
+  static estimateCalls(count: number, memo: boolean) {
+    return count * PART_ORDER.length + 3 + (memo ? 1 : 0);
   }
 
   get hasMemo() {
-    return this.input.memo.trim().length > 0;
+    return this.order.memo.trim().length > 0;
+  }
+
+  get count() {
+    return this.passages.length;
   }
 
   productName() {
-    const { exam, number, grade } = this.input;
-    return this.plan?.productName || [exam, number, grade, "영어 지문 5종 세트"].filter(Boolean).join(" ");
-  }
-
-  section(id: SectionId) {
-    return this.sections[id];
-  }
-
-  isSettled(id: SectionId) {
-    const s = this.sections[id].status;
-    return s === "done" || s === "failed" || s === "skipped";
-  }
-
-  /** 0~1. 글이 나오기 전(생각 중)에는 시간에 따라 천천히, 나오면 글자 수 기준 */
-  progress(id: SectionId) {
-    const s = this.sections[id];
-    if (this.isSettled(id)) return 1;
-    if (s.status !== "running") return 0;
-    if (!s.text) {
-      const waited = (Date.now() - (this.startedAt.get(id) ?? Date.now())) / 1000;
-      return Math.min(0.3, (waited / 90) * 0.3);
-    }
-    return 0.3 + 0.67 * Math.min(1, s.text.length / SECTION_META[id].expected);
+    return this.plan?.productName || [this.order.exam, this.order.grade, "전 지문 5종 세트"].filter(Boolean).join(" ");
   }
 
   pending() {
-    return this.running.size;
+    return this.running;
   }
 
-  skip(id: SectionId, reason: string) {
-    this.sections[id] = { ...this.sections[id], status: "skipped", error: reason };
-    this.persist();
+  // ── 세트 전체 결과물 ──────────────────────────────────────
+  globalSettled(id: GlobalId) {
+    return isSettled(this.global[id]) || (this.halted !== "" && this.global[id].status === "idle");
   }
 
-  /** 이미 돌고 있거나 끝났으면 다시 부르지 않는다. 다시 만들기는 rerun() */
-  run(id: SectionId): Promise<void> {
-    const live = this.running.get(id);
-    if (live) return live;
-    if (this.sections[id].status !== "idle") return Promise.resolve();
-    return this.start(id, true);
+  skip(id: GlobalId, reason: string) {
+    this.global[id] = { ...empty(), status: "skipped", error: reason };
+    this.persistRun();
   }
 
-  rerun(id: SectionId): Promise<void> {
-    const live = this.running.get(id);
-    if (live) return live;
-    return this.start(id, false);
+  runGlobal(id: GlobalId, force = false): Promise<void> {
+    const status = this.global[id].status;
+    if (status === "running") return Promise.resolve();
+    if (!force && status !== "idle") return Promise.resolve();
+    const ai = id !== "listing" && id !== "briefing";
+    return this.execute((patch) => this.patchGlobal(id, patch), (cache) => this.globalCall(id, cache), !force, ai);
+  }
+
+  // ── 지문별 결과물 ─────────────────────────────────────────
+  partsSettled(parts: PartId[]) {
+    return this.passages.every((p) =>
+      parts.every((id) => isSettled(p.parts[id]) || (this.halted !== "" && p.parts[id].status === "idle")),
+    );
+  }
+
+  partsProgress(parts: PartId[]) {
+    let sum = 0;
+    for (const p of this.passages)
+      for (const id of parts) {
+        const sec = p.parts[id];
+        if (isSettled(sec)) sum += 1;
+        else if (sec.status === "running")
+          sum += sec.text ? 0.3 + 0.6 * Math.min(1, sec.text.length / PART_META[id].expected) : 0.1;
+      }
+    return sum / Math.max(1, this.passages.length * parts.length);
+  }
+
+  partCount(id: PartId, status: SectionStatus) {
+    return this.passages.filter((p) => p.parts[id].status === status).length;
+  }
+
+  /** 아직 안 만든 지문만 줄 세운다 (실패한 건 force 일 때만 다시). 모두 끝나면 resolve */
+  runParts(parts: PartId[], force = false): Promise<void> {
+    const work: Promise<void>[] = [];
+    for (const p of this.passages)
+      for (const id of parts) {
+        const status = p.parts[id].status;
+        if (status === "running" || status === "done" || status === "skipped") continue;
+        if (status === "failed" && !force) continue;
+        work.push(this.runPart(p.key, id, force));
+      }
+    return Promise.all(work).then(() => undefined);
+  }
+
+  runPart(key: string, id: PartId, force = false): Promise<void> {
+    const p = this.passages.find((x) => x.key === key);
+    if (!p || p.parts[id].status === "running") return Promise.resolve();
+    return this.execute((patch) => this.patchPart(p, id, patch), (cache) => this.partCall(p, id, cache), !force, true);
+  }
+
+  // ── 실행 ────────────────────────────────────────────────
+  private async execute(
+    patch: (s: Partial<Section>) => void,
+    call: (cache: boolean) => Promise<Answer>,
+    cache: boolean,
+    ai: boolean,
+  ) {
+    if (!ai) {
+      // 등록 정보·브리핑은 AI 없이 바로 계산 — 멈춘 뒤에도 정리는 한다
+      patch({ ...empty(), ...(await call(cache)), status: "done" });
+      return;
+    }
+    this.running += 1;
+    try {
+      await this.lane.run(async () => {
+        if (this.halted) return; // 줄 서 있는 동안 멈췄으면 손대지 않는다
+        patch({ ...empty(), status: "running" });
+        try {
+          const result = await call(cache);
+          patch({ status: "done", text: result.text, truncated: result.truncated, error: "" });
+        } catch (e) {
+          const err = e as SampleError;
+          const code = err?.code ?? "upstream_error";
+          if (HALT_CODES.has(code)) this.halted = haltText(code);
+          patch({ status: "failed", text: typeof err?.text === "string" ? err.text : "", error: sampleErrorText(code) });
+        }
+      });
+    } finally {
+      this.running -= 1;
+    }
+  }
+
+  private async ask(prompt: string, tier: Tier, cache: boolean, onText: (t: string) => void, json = false) {
+    if (!this.sample) throw { code: "not_declared", message: "no sample" } satisfies SampleError;
+    const ctl = new AbortController();
+    this.controllers.add(ctl);
+    const opts = { signal: ctl.signal, modelTier: tier, cache, onText: ({ text }: { text: string }) => onText(text) };
+    try {
+      if (json) return { value: await this.sample.json(prompt, opts), text: "", truncated: false };
+      const { text, truncated } = await this.sample(prompt, opts);
+      return { value: null, text, truncated };
+    } finally {
+      this.controllers.delete(ctl);
+    }
+  }
+
+  private async globalCall(id: GlobalId, cache: boolean): Promise<Answer> {
+    const live = (text: string) => this.patchGlobal(id, { text }, false);
+    const tier = GLOBAL_META[id].tier;
+    switch (id) {
+      case "listing":
+        return { text: this.listingMarkdown(), truncated: false };
+      case "briefing":
+        return { text: this.briefingMarkdown(), truncated: false };
+      case "demand":
+        return this.ask(demandPrompt(this.setInput()), tier, cache, live);
+      case "plan": {
+        const labels = this.passages.map((p) => p.label);
+        const prompt = planPrompt(this.order.exam, this.order.grade, this.passagesForPrompt(), this.globalText("demand"));
+        const { value } = await this.ask(prompt, tier, cache, () => undefined, true);
+        const plan = cleanPlan(value, labels);
+        if (!plan) throw { code: "invalid_json", message: "plan missing fields" } satisfies SampleError;
+        this.plan = plan;
+        return { text: planToMarkdown(plan), truncated: false };
+      }
+      case "detail":
+        return this.ask(detailPrompt(this.setInfo()), tier, cache, live);
+      case "promo":
+        return this.ask(promoPrompt(this.setInfo(), this.globalText("demand")), tier, cache, live);
+    }
+  }
+
+  private partCall(p: PassageData, id: PartId, cache: boolean): Promise<Answer> {
+    const input: WorkInput = { exam: this.order.exam, number: p.label, grade: this.order.grade, passage: p.text, memo: "" };
+    const topic = this.plan?.topics.find((t) => t.label === p.label)?.topic ?? "";
+    const name = `${this.productName()} · ${p.label}`;
+    const prompt =
+      id === "analysis"
+        ? analysisPrompt(input, topic, name)
+        : id === "vocab"
+          ? vocabPrompt(input, name)
+          : id === "workbook"
+            ? workbookPrompt(input, topic, name)
+            : id === "variants"
+              ? variantsPrompt(input, topic, name)
+              : id === "writing"
+                ? writingPrompt(input, topic, name)
+                : qaPrompt(input, name, {
+                    workbook: this.partText(p, "workbook"),
+                    variants: this.partText(p, "variants"),
+                    writing: this.partText(p, "writing"),
+                  });
+    return this.ask(prompt, PART_META[id].tier, cache, (text) => this.patchPart(p, id, { text }, false));
   }
 
   cancel() {
     for (const ctl of this.controllers) ctl.abort();
   }
 
-  private start(id: SectionId, cache: boolean): Promise<void> {
-    this.sections[id] = { id, status: "running", text: "", error: "", truncated: false };
-    this.startedAt.set(id, Date.now());
-    const work = this.execute(id, cache).finally(() => {
-      this.running.delete(id);
-      this.persist();
-    });
-    this.running.set(id, work);
-    return work;
+  /** 멈춘 작업을 다시 이어서 할 수 있게 */
+  clearHalt() {
+    this.halted = "";
+    this.persistRun();
   }
 
-  private set(id: SectionId, patch: Partial<Section>) {
-    this.sections[id] = { ...this.sections[id], ...patch };
+  /** 남은 일을 전부 순서대로 (결과물 창고의 '이어서 만들기') */
+  async finishRemaining() {
+    this.clearHalt();
+    if (this.hasMemo) await this.runGlobal("demand");
+    await this.runGlobal("plan");
+    await this.runParts(["analysis", "vocab", "workbook", "variants", "writing"]);
+    await this.runParts(["qa"]);
+    await Promise.all([this.runGlobal("detail"), this.runGlobal("promo")]);
+    await this.runGlobal("listing", true);
+    await this.runGlobal("briefing", true);
   }
 
-  private async execute(id: SectionId, cache: boolean) {
-    if (id === "listing") {
-      this.set(id, { status: "done", text: this.listingMarkdown() });
-      return;
-    }
-    if (id === "briefing") {
-      this.set(id, { status: "done", text: this.briefingMarkdown() });
-      return;
-    }
-    if (!this.sample) {
-      this.set(id, { status: "failed", error: "AI 연결이 없는 화면이에요. Claude에서 이 페이지를 열어주세요." });
-      return;
-    }
+  // ── 상태 갱신 · 저장 ───────────────────────────────────────
+  private patchGlobal(id: GlobalId, patch: Partial<Section>, save = true) {
+    this.global = { ...this.global, [id]: { ...this.global[id], ...patch } };
+    if (save) this.persistRun();
+  }
 
-    const ctl = new AbortController();
-    this.controllers.add(ctl);
-    const options = {
-      signal: ctl.signal,
-      modelTier: SECTION_META[id].tier,
-      cache,
-      onText: ({ text }: { text: string }) => this.set(id, { text }),
+  private patchPart(p: PassageData, id: PartId, patch: Partial<Section>, save = true) {
+    p.parts = { ...p.parts, [id]: { ...p.parts[id], ...patch } };
+    if (save) {
+      this.saver?.savePassage(this.id, p);
+      this.persistRun();
+    }
+  }
+
+  private globalText(id: GlobalId) {
+    return this.global[id].status === "done" ? this.global[id].text : "";
+  }
+
+  private partText(p: PassageData, id: PartId) {
+    return p.parts[id].status === "done" ? p.parts[id].text : "";
+  }
+
+  private passagesForPrompt(): Passage[] {
+    return this.passages.map((p) => ({ key: p.key, label: p.label, text: p.text, words: 0, dropped: 0 }));
+  }
+
+  private setInput(): WorkInput {
+    return {
+      exam: this.order.exam,
+      number: `전 지문 ${this.count}개`,
+      grade: this.order.grade,
+      passage: "",
+      memo: this.order.memo,
     };
-    try {
-      if (id === "plan") {
-        const raw = await this.sample.json(planPrompt(this.input, this.text("demand")), options);
-        const plan = cleanPlan(raw);
-        if (!plan) throw { code: "invalid_json", message: "plan missing fields" } satisfies SampleError;
-        this.plan = plan;
-        this.set(id, { status: "done", text: planToMarkdown(plan) });
-        return;
-      }
-      const { text, truncated } = await this.sample(this.prompt(id), options);
-      this.set(id, { status: "done", text, truncated });
-    } catch (e) {
-      const err = e as SampleError;
-      const partial = typeof err?.text === "string" && id !== "plan" ? err.text : "";
-      this.set(id, { status: "failed", text: partial, error: sampleErrorText(err?.code ?? "upstream_error") });
-    } finally {
-      this.controllers.delete(ctl);
-    }
   }
 
-  private text(id: SectionId) {
-    const s = this.sections[id];
-    return s.status === "done" ? s.text : "";
-  }
-
-  private prompt(id: SectionId): string {
-    const name = this.productName();
-    const { input, plan } = this;
-    switch (id) {
-      case "demand":
-        return demandPrompt(input);
-      case "analysis":
-        return analysisPrompt(input, plan, name);
-      case "vocab":
-        return vocabPrompt(input, name);
-      case "workbook":
-        return workbookPrompt(input, plan, name);
-      case "variants":
-        return variantsPrompt(input, plan, name);
-      case "writing":
-        return writingPrompt(input, plan, name);
-      case "qa":
-        return qaPrompt(input, name, {
-          workbook: this.text("workbook"),
-          variants: this.text("variants"),
-          writing: this.text("writing"),
-        });
-      case "detail":
-        return detailPrompt(input, plan, name);
-      case "promo":
-        return promoPrompt(input, plan, name, this.text("demand"));
-      default:
-        throw new Error(`no prompt for ${id}`);
-    }
+  private setInfo(): SetInfo {
+    return {
+      exam: this.order.exam,
+      grade: this.order.grade,
+      name: this.productName(),
+      plan: this.plan,
+      labels: this.passages.map((p) => p.label),
+    };
   }
 
   // ── AI 없이 만드는 결과물 ─────────────────────────────────
   productCode() {
     const d = new Date(this.createdAt);
     const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-    return `VR-${slug(this.input.grade)}-${slug(this.input.exam)}-${slug(this.input.number)}-${ymd}`;
-  }
-
-  fileName(part: string) {
-    return fileNameFor(this.input, part);
+    return `VR-${slug(this.order.grade)}-${slug(this.order.exam)}-${ymd}`;
   }
 
   sheetRow() {
-    const d = new Date(this.createdAt).toISOString().slice(0, 10);
     return [
       this.productCode(),
       this.productName(),
-      this.input.grade,
-      this.input.exam,
-      this.input.number,
-      "분석지·단어장·워크북·변형문제·서술형",
+      this.order.grade,
+      this.order.exam,
+      `${this.count}지문`,
+      "분석지·단어장·워크북·변형문제·서술형 (PDF)",
       "",
-      d,
+      new Date(this.createdAt).toISOString().slice(0, 10),
     ].join("\t");
+  }
+
+  private verdicts() {
+    let ok = 0;
+    let fix = 0;
+    for (const p of this.passages) {
+      const match = /최종 판정[^\n]*?:\s*\**([^\n*]+)/.exec(this.partText(p, "qa"));
+      if (!match) continue;
+      if (/수정/.test(match[1])) fix += 1;
+      else ok += 1;
+    }
+    return { ok, fix };
   }
 
   private listingMarkdown() {
     const name = this.productName();
-    const qa = this.qaVerdict();
+    const { ok, fix } = this.verdicts();
+    const first = this.passages[0]?.label ?? "";
+    const last = this.passages[this.count - 1]?.label ?? "";
     return [
       `# 상품 등록 정보 — ${name}`,
       "",
@@ -355,66 +489,69 @@ export class WorkJob {
       "|---|---|",
       `| 상품 코드 | ${this.productCode()} |`,
       `| 상품명 | ${name} |`,
-      `| 대상 | ${this.input.grade} |`,
-      `| 시험/교재 | ${this.input.exam || "—"} |`,
-      `| 문항 | ${this.input.number || "—"} |`,
-      "| 구성 | 분석지 · 단어장 · 워크북 · 변형문제 5문항 · 서술형 4문항 |",
+      `| 대상 | ${this.order.grade} |`,
+      `| 시험/교재 | ${this.order.exam || "—"} |`,
+      `| 지문 | ${this.count}개 (${first}${this.count > 1 ? ` ~ ${last}` : ""}) |`,
+      "| 구성 | 지문마다 분석지 · 단어장 · 워크북 · 변형문제 5문항 · 서술형 4문항 |",
+      "| 파일 | 지문별 PDF + 전 지문 통합 PDF |",
       "| 가격 | [대표 입력] |",
-      `| 검수 판정 | ${qa || "검수 보고서 확인 필요"} |`,
+      `| 검수 | 판매 가능 ${ok}지문 · 수정 후 판매 ${fix}지문 |`,
       "",
       "## 파일 이름",
-      ...SALE_SECTIONS.map((id) => `- ${this.fileName(SECTION_META[id].title.replace(/\s/g, ""))}`),
-      `- ${this.fileName("전체세트")}`,
+      `- ${fileNameFor(this.order, "전지문_5종_통합", "pdf")}`,
+      ...this.passages.map((p) => `- ${fileNameFor(this.order, `${slug(p.label)}_5종`, "pdf")}`),
       "",
       "## 스프레드시트에 붙여넣기",
-      "- '시트용 한 줄 복사'를 누르면 아래 순서로 복사돼요: 상품 코드 · 상품명 · 대상 · 시험 · 문항 · 구성 · 가격 · 등록일",
+      "- '시트용 한 줄 복사'를 누르면 이 순서로 복사돼요: 상품 코드 · 상품명 · 대상 · 시험 · 지문 수 · 구성 · 가격 · 등록일",
       "- 가격 칸은 비어 있어요. 시트에서 직접 넣어주세요.",
     ].join("\n");
   }
 
-  private qaVerdict() {
-    const match = /최종 판정[^\n]*?:\s*\**([^\n*]+)/.exec(this.text("qa"));
-    return match?.[1]?.trim() ?? "";
-  }
-
   private briefingMarkdown() {
     const today = new Date().toLocaleDateString("ko-KR");
-    const rows = SECTION_ORDER.filter((id) => id !== "briefing").map((id) => {
-      const s = this.sections[id];
-      const team = roomOf(SECTION_META[id].dept).name;
-      const state =
-        s.status === "done"
-          ? s.truncated
-            ? "완료 (길어서 일부 잘림)"
-            : "완료"
-          : s.status === "failed"
-            ? `실패 — ${s.error}`
-            : s.status === "skipped"
-              ? `건너뜀 — ${s.error}`
-              : "대기";
-      return `| ${team} | ${SECTION_META[id].title} | ${state} |`;
+    const n = this.count;
+    const rows = PART_ORDER.map((id) => {
+      const done = this.partCount(id, "done");
+      const failed = this.partCount(id, "failed");
+      return `| ${roomOf(PART_META[id].dept).name} | ${PART_META[id].title} | ${done}/${n} 완료${failed ? ` · 실패 ${failed}` : ""} |`;
     });
-    const qaSummary = (/## 요약\n([\s\S]*?)(\n## |$)/.exec(this.text("qa"))?.[1] ?? "").trim();
-    const failed = SECTION_ORDER.filter((id) => this.sections[id].status === "failed").map((id) => SECTION_META[id].title);
+    const globalRows = (["plan", "detail", "promo", "listing"] as GlobalId[]).map((id) => {
+      const s = this.global[id];
+      const state =
+        s.status === "done" ? "완료" : s.status === "failed" ? `실패 — ${s.error}` : s.status === "skipped" ? "건너뜀" : "대기";
+      return `| ${roomOf(GLOBAL_META[id].dept).name} | ${GLOBAL_META[id].title} | ${state} |`;
+    });
+    const { ok, fix } = this.verdicts();
+    const missing = SALE_PARTS.reduce((sum, id) => sum + (n - this.partCount(id, "done")), 0);
     const resting = Object.entries(BLOCK_NEED).map(([dept, need]) => `- ${roomOf(dept).name}: ${need} 전이라 오늘은 쉬었어요.`);
+    const todo = [
+      ...(this.halted ? [`AI 작업이 중간에 멈췄어요 (${this.halted}) — 결과물 창고에서 '이어서 만들기'`] : []),
+      ...(missing ? [`아직 없는 판매 자료 ${missing}건 — '이어서 만들기' 또는 실패한 자료 '다시 만들기'`] : []),
+      `검수 보고서 확인 — 수정 후 판매로 나온 지문 ${fix}개`,
+      "PDF 내려받기 (지문별 + 전 지문 통합본)",
+      "판매 파일 드라이브에 올리고 시트에 등록 (구글 드라이브를 연결하면 직원들이 해요)",
+      "황영카·기출비 카페와 블로그에 홍보글 게시 + 견본 PDF 첨부",
+    ];
     return [
       `# 비서실 브리핑 — ${today}`,
       "",
-      `${DEPT_LEAD.secretary.name} 비서실장이 정리했어요. 상품: **${this.productName()}**`,
+      `${DEPT_LEAD.secretary.name} 비서실장이 정리했어요. 상품: **${this.productName()}** (지문 ${n}개)`,
       "",
-      "## 오늘 만든 자료",
+      "## 지문별 자료",
       "| 팀 | 결과물 | 상태 |",
       "|---|---|---|",
       ...rows,
       "",
-      "## 검수 의견",
-      qaSummary || "- 검수 보고서가 없어요. 검수팀 결과를 확인해주세요.",
+      "## 세트 자료",
+      "| 팀 | 결과물 | 상태 |",
+      "|---|---|---|",
+      ...globalRows,
+      "",
+      "## 검수 결과",
+      `- 판매 가능 ${ok}지문 · 수정 후 판매 ${fix}지문 · 판정 없음 ${n - ok - fix}지문`,
       "",
       "## 대표님이 하실 일",
-      ...(failed.length ? [`1. 실패한 자료 다시 만들기: ${failed.join(", ")}`] : []),
-      `${failed.length ? 2 : 1}. 검수 보고서의 수정 제안 확인`,
-      `${failed.length ? 3 : 2}. 판매 사이트 관리자페이지에 파일 업로드 (자료관리팀 등록 정보 참고)`,
-      `${failed.length ? 4 : 3}. 황영카·기출비 카페와 블로그에 홍보글 게시 + 견본 PDF 첨부`,
+      ...todo.map((t, i) => `${i + 1}. ${t}`),
       "",
       ...(resting.length ? ["## 쉬는 팀", ...resting] : []),
     ].join("\n");
@@ -423,17 +560,20 @@ export class WorkJob {
   // ── 저장 ────────────────────────────────────────────────
   data(): RunData {
     return {
+      version: 2,
       id: this.id,
       createdAt: this.createdAt,
-      input: this.input,
+      order: this.order,
       plan: this.plan,
       productName: this.productName(),
-      sections: { ...this.sections },
+      global: this.global,
+      passages: this.passages.map((p) => ({ ...p })),
+      halted: this.halted,
       sheetRow: this.sheetRow(),
     };
   }
 
-  private persist() {
-    this.save?.(this.data());
+  private persistRun() {
+    this.saver?.saveRun(this.data());
   }
 }

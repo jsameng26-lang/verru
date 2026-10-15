@@ -7,10 +7,10 @@ import { BLOCK_NEED, CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { LINK_ROWS } from "./links";
 import { getDb, getDownloads, getPermissions, getSample, inClaude, type Downloads, type SampleFn } from "./ai/claude";
-import { fileNameFor, SECTION_ORDER, WorkJob, type RunData, type SectionId } from "./ai/job";
-import type { WorkInput } from "./ai/prompts";
-import { RunStore } from "./ai/store";
-import { OutputModal, OutputsPanel, RunModal, WorkOrder, type AiState } from "./Work";
+import { GLOBAL_ORDER, PART_ORDER, SALE_PARTS, WorkJob, fileNameFor, type OrderInput, type RunData } from "./ai/job";
+import { parsePassages } from "./ai/passages";
+import { RunStore, summarize, type RunSummary } from "./ai/store";
+import { DocModal, OutputsPanel, SetModal, WorkOrder, estimate, saleReadyCount, type AiState, type DocRef } from "./Work";
 import { COMPANY, STORAGE_LINK, TODAY_PICK } from "../company.config";
 
 type View = "live" | "dashboard";
@@ -29,14 +29,17 @@ const BLOCK_NEEDS = Object.values(BLOCK_NEED);
 /** 대표 승인 회의에 올라오는 팀장들 (자료기획 · 분석지 · 비서실) */
 const APPROVERS = [DEPT_LEAD.strategy1, DEPT_LEAD.strategy2, DEPT_LEAD.secretary].map((s) => s.name).join("·");
 
-const EMPTY_ORDER: WorkInput = { exam: "", number: "", grade: "고2", passage: "", memo: "" };
+const EMPTY_ORDER: OrderInput = { exam: "", grade: "고2", passages: "", memo: "" };
 const DRAFT_KEY = "verru-work-order";
 
 /** 작성 중이던 작업 지시서 (이 브라우저에만 보관) */
-function loadDraft(): WorkInput {
+function loadDraft(): OrderInput {
   try {
     const raw = localStorage.getItem(DRAFT_KEY);
-    if (raw) return { ...EMPTY_ORDER, ...(JSON.parse(raw) as Partial<WorkInput>) };
+    if (raw) {
+      const saved = JSON.parse(raw) as Partial<OrderInput> & { passage?: string };
+      return { ...EMPTY_ORDER, ...saved, passages: saved.passages ?? saved.passage ?? "" };
+    }
   } catch {
     // 저장소를 못 쓰는 환경이면 빈 지시서로 시작
   }
@@ -49,16 +52,23 @@ function pickFor(run: RunData | null) {
     return { badge: `TOP 1 제안 · ${TODAY_PICK.score}점`, title: TODAY_PICK.title, summary: TODAY_PICK.summary, reasons: TODAY_PICK.reasons, real: false };
   }
   const plan = run.plan;
+  const n = run.passages.length;
+  const est = estimate(n, Boolean(run.order.memo.trim()));
   return {
-    badge: plan ? `제작 계획 · 난이도 ${plan.difficulty}` : "제작 계획",
+    badge: `전 지문 ${n}개 · 5종${plan ? ` · 난이도 ${plan.difficulty}` : ""}`,
     title: run.productName,
-    summary: plan ? `${plan.summary} (주제: ${plan.topic})` : "계획 작성에 실패했어요. 지문으로 바로 5종 세트를 만들 수 있어요.",
+    summary: `${plan?.summary || "계획 작성에 실패했어요. 지문으로 바로 5종 세트를 만들 수 있어요."} 승인하면 AI 작업 약 ${est.calls}번, ${est.min}~${est.max}분 걸려요.`,
     reasons: plan ? plan.points.map((point, i) => `${"①②③"[i] ?? "·"} ${point}`) : [],
     real: true,
   };
 }
 
-const runPending = (run: RunData | null) => Boolean(run && SECTION_ORDER.some((id) => run.sections[id].status === "running"));
+const runPending = (run: RunData | null) =>
+  Boolean(
+    run &&
+      (GLOBAL_ORDER.some((id) => run.global[id].status === "running") ||
+        run.passages.some((p) => PART_ORDER.some((id) => p.parts[id].status === "running"))),
+  );
 
 function todayLabel() {
   const d = new Date();
@@ -104,10 +114,14 @@ export default function Home() {
   // ── 실제 업무: AI 연결 · 저장소 · 파일 저장 ──
   const [ai, setAi] = useState<AiState>("checking");
   const [canSave, setCanSave] = useState(false);
-  const [runs, setRuns] = useState<RunData[]>([]);
-  const [order, setOrder] = useState<WorkInput>(loadDraft);
-  const [viewing, setViewing] = useState<{ runId: string; section: SectionId } | null>(null);
-  const [openRunId, setOpenRunId] = useState<string | null>(null);
+  const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [order, setOrder] = useState<OrderInput>(loadDraft);
+  const parsed = useMemo(() => parsePassages(order.passages), [order.passages]);
+  /** 열려 있는 세트 창 — 창고에서 연 세트는 지문 전문을 불러와 data 에 담는다 */
+  const [openSet, setOpenSet] = useState<{ id: string; data: RunData | null } | null>(null);
+  const [doc, setDoc] = useState<{ runId: string; ref: DocRef } | null>(null);
+  /** PDF 만드는 중 안내 (비어 있으면 한가함) */
+  const [busy, setBusy] = useState("");
   const sampleRef = useRef<SampleFn | null>(null);
   const downloadsRef = useRef<Downloads | null>(null);
   const storeRef = useRef<RunStore | null>(null);
@@ -191,40 +205,101 @@ export default function Home() {
     [showToast],
   );
 
-  const saveDocx = useCallback(
-    async (run: RunData, ids: SectionId[], part: string) => {
-      const parts = ids.map((id) => ({ markdown: run.sections[id]?.text ?? "" })).filter((x) => x.markdown);
-      if (!parts.length) return;
-      const filename = fileNameFor(run.input, part);
-      try {
-        // 워드 파일 도구는 무거워서 저장할 때만 불러온다
-        const { buildDocx } = await import("./ai/docx");
-        const blob = await buildDocx(parts, `${COMPANY.reportName} · ${STORAGE_LINK.replace(/^https?:\/\//, "")}`);
-        const downloads = downloadsRef.current;
-        if (downloads) {
+  /** 파일 저장 — Claude 페이지에선 저장 확인 창, 로컬에선 브라우저 다운로드 */
+  const saveBlob = useCallback(
+    async (blob: Blob, filename: string) => {
+      const downloads = downloadsRef.current;
+      if (downloads) {
+        try {
           const result = await downloads.save({ filename, data: blob });
           if (result.status === "saved") showToast(`${filename} 저장했어요`);
-        } else {
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = filename;
-          link.click();
-          window.setTimeout(() => URL.revokeObjectURL(url), 2000);
-          showToast(`${filename} 저장했어요`);
+        } catch (error) {
+          const code = (error as { code?: string })?.code;
+          if (code === "declined") return;
+          showToast(code === "rate_limited" ? "저장 확인 창이 이미 열려 있어요" : "저장하지 못했어요. 다시 눌러주세요.");
         }
-      } catch (error) {
-        const code = (error as { code?: string })?.code;
-        if (code === "declined") return;
-        showToast(code === "rate_limited" ? "저장 확인 창이 이미 열려 있어요" : "저장하지 못했어요. 다시 눌러주세요.");
+        return;
       }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+      showToast(`${filename} 저장했어요`);
     },
     [showToast],
   );
 
-  /** 지금 돌고 있는 작업이면 화면 스냅샷, 아니면 결과물 창고에서 찾는다 */
+  const saveDocx = useCallback(
+    async (run: RunData, markdown: string, part: string) => {
+      // 워드 파일 도구는 무거워서 저장할 때만 불러온다
+      const { buildDocx } = await import("./ai/docx");
+      const blob = await buildDocx([{ markdown }], `${COMPANY.reportName} · ${STORAGE_LINK.replace(/^https?:\/\//, "")}`);
+      await saveBlob(blob, fileNameFor(run.order, part, "docx"));
+    },
+    [saveBlob],
+  );
+
+  /** PDF 만들기 — 한 번에 하나씩, 진행 상황을 보여준다 */
+  const makePdf = useCallback(
+    async (label: string, make: (pdf: typeof import("./ai/pdf")) => Promise<{ blob: Blob; name: string }>) => {
+      if (busy) return;
+      setBusy(`${label} 만드는 중…`);
+      try {
+        const pdf = await import("./ai/pdf");
+        const { blob, name } = await make(pdf);
+        await saveBlob(blob, name);
+      } catch (error) {
+        showToast(`PDF를 만들지 못했어요 — ${error instanceof Error ? error.message : "다시 눌러주세요"}`);
+      } finally {
+        setBusy("");
+      }
+    },
+    [busy, saveBlob, showToast],
+  );
+
+  /** 지금 돌고 있는 작업이면 화면 스냅샷, 아니면 창고에서 불러온 세트 */
   const findRun = (id: string): RunData | null =>
-    snap.job?.id === id ? snap.job : (runs.find((r) => r.id === id) ?? null);
+    snap.job?.id === id ? snap.job : openSet?.id === id ? openSet.data : null;
+
+  const openStoredSet = (summary: RunSummary) => {
+    if (snap.job?.id === summary.id) {
+      setOpenSet({ id: summary.id, data: null });
+      return;
+    }
+    const store = storeRef.current;
+    if (!store) return;
+    setOpenSet({ id: summary.id, data: null });
+    showToast("결과물을 불러오는 중이에요…");
+    store
+      .load(summary)
+      .then((data) => setOpenSet((cur) => (cur?.id === summary.id ? { id: summary.id, data } : cur)))
+      .catch(() => {
+        setOpenSet(null);
+        showToast("결과물을 불러오지 못했어요. 다시 눌러주세요.");
+      });
+  };
+
+  /** 멈췄거나 덜 된 세트를 사무실에서 이어서 만든다 */
+  const resumeSet = (run: RunData) => {
+    if (snap.running) {
+      showToast("지금 업무 중이에요. 오늘 업무가 끝난 뒤 이어서 만들 수 있어요.");
+      return;
+    }
+    if (ai !== "ready") {
+      showToast("이 화면에선 AI를 쓸 수 없어요.");
+      return;
+    }
+    void getPermissions()
+      .then((permissions) => permissions?.request(["sample"]))
+      .catch(() => undefined);
+    engine.start(WorkJob.restore(run, sampleRef.current, storeRef.current));
+    setOpenSet(null);
+    setBriefing(false);
+    setView("live");
+    showToast("남은 자료를 이어서 만들어요 — 이미 만든 건 그대로 둬요");
+  };
 
   /** 오늘 브리핑을 텍스트로 만들어 클립보드에 복사한다 (카톡·노션 어디든 붙여넣기) */
   const sendReport = useCallback(
@@ -274,10 +349,14 @@ export default function Home() {
       return;
     }
     if (ai === "ready") {
-      const words = order.passage.trim().split(/\s+/).filter(Boolean).length;
-      if (words < 30) {
+      const short = parsed.filter((p) => p.words < 20);
+      if (!parsed.length || short.length) {
         setView("live");
-        showToast("작업 지시서에 영어 지문을 붙여넣어 주세요 (30단어 이상)");
+        showToast(
+          parsed.length
+            ? `너무 짧은 지문이 있어요 (${short.map((p) => p.label).join(", ")}) — 번호 줄을 확인해주세요`
+            : "작업 지시서에 전 지문을 붙여넣어 주세요",
+        );
         window.setTimeout(() => {
           document.getElementById("work-order")?.scrollIntoView({ behavior: "smooth", block: "center" });
           document.getElementById("order-passage")?.focus();
@@ -288,9 +367,8 @@ export default function Home() {
       void getPermissions()
         .then((permissions) => permissions?.request(["sample"]))
         .catch(() => undefined);
-      const job = new WorkJob({ ...order, passage: order.passage.trim() }, sampleRef.current, storeRef.current?.save ?? null);
-      engine.start(job);
-      showToast(`07:00 — AI 직원 ${HEADCOUNT}명이 출근해서 실제로 자료를 만듭니다 ✨`);
+      engine.start(new WorkJob({ ...order }, parsed, sampleRef.current, storeRef.current));
+      showToast(`07:00 — AI 직원 ${HEADCOUNT}명이 출근해서 지문 ${parsed.length}개 5종 세트를 만듭니다 ✨`);
     } else {
       engine.start(null);
       showToast("연습 모드로 출근합니다 — 이 화면에선 실제 자료는 만들어지지 않아요");
@@ -373,7 +451,9 @@ export default function Home() {
             ai={ai}
             order={order}
             setOrder={setOrder}
-            onOpenOutput={(section) => snap.job && setViewing({ runId: snap.job.id, section })}
+            parsed={parsed}
+            onOpenDoc={(ref) => snap.job && setDoc({ runId: snap.job.id, ref })}
+            onOpenSet={() => snap.job && setOpenSet({ id: snap.job.id, data: null })}
             onStopWork={() => engine.job?.cancel()}
           />
         ) : (
@@ -386,9 +466,10 @@ export default function Home() {
             onStart={start}
             onApprove={approve}
             onSelect={(id) => setSelectedId(id)}
-            runs={snap.job && !runs.some((r) => r.id === snap.job!.id) ? [snap.job, ...runs] : runs}
+            runs={snap.job && !runs.some((r) => r.id === snap.job!.id) ? [summarize(snap.job), ...runs] : runs}
+            liveId={snap.job && runPending(snap.job) ? snap.job.id : null}
             stored={Boolean(storeRef.current)}
-            onOpenRun={setOpenRunId}
+            onOpenRun={(summary) => (summary.id === snap.job?.id ? setOpenSet({ id: summary.id, data: null }) : openStoredSet(summary))}
           />
         )}
 
@@ -418,37 +499,67 @@ export default function Home() {
           onClose={() => setBriefing(false)}
           onOpenBriefing={() => {
             setBriefing(false);
-            if (snap.job) setViewing({ runId: snap.job.id, section: "briefing" });
+            if (snap.job) setDoc({ runId: snap.job.id, ref: { kind: "global", id: "briefing" } });
           }}
         />
       ) : null}
-      {openRunId && findRun(openRunId) ? (
-        <RunModal
-          run={findRun(openRunId)!}
+      {openSet && findRun(openSet.id) ? (
+        <SetModal
+          run={findRun(openSet.id)!}
+          busy={busy}
           canSave={canSave}
-          onOpen={(section) => setViewing({ runId: openRunId, section })}
-          onSave={(ids, part) => void saveDocx(findRun(openRunId)!, ids, part)}
+          canResume={ai === "ready" && !snap.running}
+          live={snap.job?.id === openSet.id}
+          onOpenDoc={(ref) => setDoc({ runId: openSet.id, ref })}
+          onPassagePdf={(key) => {
+            const run = findRun(openSet.id)!;
+            const passage = run.passages.find((p) => p.key === key)!;
+            void makePdf(`${passage.label} PDF`, async (pdf) => ({
+              blob: await pdf.passagePdf(run, passage),
+              name: pdf.passagePdfName(run, passage),
+            }));
+          }}
+          onCombinedPdf={() => {
+            const run = findRun(openSet.id)!;
+            void makePdf("전 지문 통합 PDF", async (pdf) => ({ blob: await pdf.combinedPdf(run), name: pdf.combinedPdfName(run) }));
+          }}
+          onBundle={() => {
+            const run = findRun(openSet.id)!;
+            void makePdf("PDF 묶음", async (pdf) => ({
+              blob: await pdf.bundleZip(run, (done, total) => setBusy(`PDF 만드는 중… ${done}/${total}`)),
+              name: fileNameFor(run.order, "전지문_5종_PDF묶음", "zip"),
+            }));
+          }}
+          onResume={() => resumeSet(findRun(openSet.id)!)}
           onDelete={
-            storeRef.current && !runPending(findRun(openRunId))
+            storeRef.current && snap.job?.id !== openSet.id
               ? () => {
-                  void storeRef.current?.remove(openRunId).catch(() => showToast("지우지 못했어요. 다시 눌러주세요."));
-                  setOpenRunId(null);
+                  const summary = runs.find((r) => r.id === openSet.id);
+                  if (summary)
+                    void storeRef.current?.remove(summary).catch(() => showToast("지우지 못했어요. 다시 눌러주세요."));
+                  setOpenSet(null);
                 }
               : null
           }
-          onClose={() => setOpenRunId(null)}
+          onClose={() => setOpenSet(null)}
         />
       ) : null}
-      {viewing && findRun(viewing.runId) ? (
-        <OutputModal
-          run={findRun(viewing.runId)!}
-          id={viewing.section}
+      {doc && findRun(doc.runId) ? (
+        <DocModal
+          run={findRun(doc.runId)!}
+          doc={doc.ref}
           canSave={canSave}
-          canRerun={engine.job?.id === viewing.runId && ai === "ready"}
-          onRerun={() => void engine.job?.rerun(viewing.section)}
+          canRerun={engine.job?.id === doc.runId && ai === "ready"}
+          onRerun={() => {
+            const job = engine.job;
+            if (!job) return;
+            job.clearHalt();
+            if (doc.ref.kind === "global") void job.runGlobal(doc.ref.id, true);
+            else void job.runPart(doc.ref.key, doc.ref.id, true);
+          }}
           onCopy={(text, done) => void copy(text, done)}
-          onSave={(ids, part) => void saveDocx(findRun(viewing.runId)!, ids, part)}
-          onClose={() => setViewing(null)}
+          onSaveDocx={(markdown, part) => void saveDocx(findRun(doc.runId)!, markdown, part)}
+          onClose={() => setDoc(null)}
         />
       ) : null}
       {manualCopy !== null ? <CopyModal text={manualCopy} onClose={() => setManualCopy(null)} /> : null}
@@ -474,7 +585,9 @@ function LiveView({
   ai,
   order,
   setOrder,
-  onOpenOutput,
+  parsed,
+  onOpenDoc,
+  onOpenSet,
   onStopWork,
 }: {
   engine: Company;
@@ -489,9 +602,11 @@ function LiveView({
   onPublish: () => void;
   copied: boolean;
   ai: AiState;
-  order: WorkInput;
-  setOrder: (next: WorkInput) => void;
-  onOpenOutput: (section: SectionId) => void;
+  order: OrderInput;
+  setOrder: (next: OrderInput) => void;
+  parsed: ReturnType<typeof parsePassages>;
+  onOpenDoc: (ref: DocRef) => void;
+  onOpenSet: () => void;
   onStopWork: () => void;
 }) {
   const pick = pickFor(snap.job);
@@ -572,13 +687,20 @@ function LiveView({
         </div>
       </section>
 
-      <WorkOrder input={order} setInput={setOrder} ai={ai} locked={snap.running} />
+      <WorkOrder order={order} setOrder={setOrder} parsed={parsed} ai={ai} locked={snap.running} />
 
       <section className="live-grid">
         <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow={follow} onSelect={onSelect} />
 
         <aside className="live-rail">
-          <OutputsPanel run={snap.job} ai={ai} pending={runPending(snap.job)} onOpen={onOpenOutput} onStop={onStopWork} />
+          <OutputsPanel
+            run={snap.job}
+            ai={ai}
+            pending={(engine.job?.pending() ?? 0) > 0}
+            onOpenDoc={onOpenDoc}
+            onOpenSet={onOpenSet}
+            onStop={onStopWork}
+          />
 
           <CeoConsole engine={engine} snap={snap} />
 
@@ -602,7 +724,7 @@ function LiveView({
                     ))}
                   </div>
                   {pick.real ? (
-                    <button className="text-button" onClick={() => onOpenOutput("plan")}>
+                    <button className="text-button" onClick={() => onOpenDoc({ kind: "global", id: "plan" })}>
                       제작 계획 자세히 보기
                     </button>
                   ) : null}
@@ -838,8 +960,8 @@ function BriefingModal({
   onOpenBriefing: () => void;
 }) {
   const run = snap.job;
-  const made = run ? SECTION_ORDER.filter((id) => run.sections[id].status === "done").length : 0;
-  const failed = run ? SECTION_ORDER.filter((id) => run.sections[id].status === "failed").length : 0;
+  const made = run ? saleReadyCount(run) : 0;
+  const failed = run ? run.passages.reduce((sum, p) => sum + PART_ORDER.filter((id) => p.parts[id].status === "failed").length, 0) : 0;
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <section
@@ -862,11 +984,15 @@ function BriefingModal({
             <ul>
               <li>
                 <span className="dot green" />
-                ‘{run.productName}’ — 결과물 {made}건 완성
+                ‘{run.productName}’ — 지문 {run.passages.length}개 중 {made}개 자료 완성
               </li>
               <li>
                 <span className={`dot ${failed ? "yellow" : "green"}`} />
-                {failed ? `${failed}건은 실패했어요 — 결과물에서 ‘다시 만들기’를 눌러주세요` : "실패한 작업 없음"}
+                {run.halted
+                  ? `중간에 멈췄어요 — ${run.halted}`
+                  : failed
+                    ? `${failed}건은 실패했어요 — 지문별 결과물에서 다시 만들 수 있어요`
+                    : "실패한 작업 없음"}
               </li>
               <li>
                 <span className="dot gray" />
@@ -889,7 +1015,7 @@ function BriefingModal({
             <span className="tiny-label">대표님이 하실 일</span>
             <strong>
               {run
-                ? "검수 보고서 확인 → 사이트에 파일 업로드 → 카페·블로그에 홍보글 게시"
+                ? "검수 보고서 확인 → PDF 받아서 판매 드라이브에 올리기 → 카페·블로그에 홍보글 게시"
                 : "없습니다. 내일 07:00에 다시 출근할게요 ✨"}
             </strong>
           </div>
@@ -967,6 +1093,7 @@ function DashboardView({
   onSelect,
   runs,
   stored,
+  liveId,
   onOpenRun,
 }: {
   teams: TeamRow[];
@@ -977,9 +1104,10 @@ function DashboardView({
   onStart: () => void;
   onApprove: () => void;
   onSelect: (id: string) => void;
-  runs: RunData[];
+  runs: RunSummary[];
   stored: boolean;
-  onOpenRun: (id: string) => void;
+  liveId: string | null;
+  onOpenRun: (summary: RunSummary) => void;
 }) {
   const rows = LINK_ROWS;
   const pick = pickFor(snap.job);
@@ -1215,18 +1343,25 @@ function DashboardView({
             </div>
             {runs.length ? (
               runs.map((run) => {
-                const done = SECTION_ORDER.filter((id) => run.sections[id]?.status === "done").length;
-                const failed = SECTION_ORDER.filter((id) => run.sections[id]?.status === "failed").length;
-                const working = runPending(run);
+                const total = run.passageIndex.length;
+                const done = run.passageIndex.filter((p) => SALE_PARTS.every((id) => p.status[id] === "done")).length;
+                const failed = run.passageIndex.filter((p) => SALE_PARTS.some((id) => p.status[id] === "failed")).length;
+                const working = liveId === run.id;
                 return (
                   <div className="result-row" key={run.id}>
                     <b>{run.productName}</b>
                     <span>{new Date(run.createdAt).toLocaleDateString("ko-KR")}</span>
                     <span className={`status-pill ${working ? "working" : failed ? "blocked" : "done"}`}>
-                      {working ? "만드는 중" : failed ? `${done}건 완료 · ${failed}건 실패` : `${done}건 완료`}
+                      {working
+                        ? `만드는 중 ${done}/${total}`
+                        : run.halted
+                          ? `멈춤 ${done}/${total} · 이어서 가능`
+                          : failed
+                            ? `${done}/${total} 완료 · 실패 ${failed}`
+                            : `${done}/${total} 지문 완료`}
                     </span>
                     <span>
-                      <button className="mini-open" onClick={() => onOpenRun(run.id)}>
+                      <button className="mini-open" onClick={() => onOpenRun(run)}>
                         열기
                       </button>
                     </span>
@@ -1240,7 +1375,7 @@ function DashboardView({
             )}
           </div>
           {!stored && runs.length ? (
-            <p className="dash-note">이 화면에선 저장소를 쓸 수 없어서, 페이지를 닫으면 결과물이 사라져요. 필요한 건 .docx로 저장해두세요.</p>
+            <p className="dash-note">이 화면에선 저장소를 쓸 수 없어서, 페이지를 닫으면 결과물이 사라져요. 필요한 건 PDF로 받아두세요.</p>
           ) : null}
         </div>
       </section>

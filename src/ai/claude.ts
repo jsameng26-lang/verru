@@ -43,6 +43,7 @@ export type DocRef = {
 export type Query = {
   orderBy(field: string, dir?: "asc" | "desc"): Query;
   limit(n: number): Query;
+  get(): Promise<QuerySnap>;
   onSnapshot(next: (snap: QuerySnap) => void, error?: (e: { code: string }) => void): () => void;
 };
 export type Collection = Query & { doc(id?: string): DocRef };

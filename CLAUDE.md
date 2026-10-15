@@ -22,7 +22,12 @@ Vite + React + TypeScript, 서버 없음.
 
 Claude 아티팩트로 게시하면 `sample`(AI 호출) · `db`(결과물 창고, `runs` 컬렉션) · `downloads`(.docx 저장)를 쓴다.
 게시할 때 capabilities: `{ sample: {}, db: { rules: [{ path: "runs", read: "admin", write: "admin" }] }, downloads: true }`.
+게시 파일: 페이지 + `assets/*`(해시 이름 그대로, 청크끼리 서로 import) + `fonts/*`(PDF 글꼴, 라이선스 포함).
+번들은 `esbuild.charset: "ascii"` 로 만든다 (docx 라이브러리의 U+FFFD 때문에 게시가 거부됨).
 팀별 프롬프트는 `src/ai/prompts.ts`, 작업 흐름은 `src/ai/job.ts` + `src/game/sim.ts` 의 dayScript.
+판매 세트는 항상 "전 지문 5종"(분석지·단어장·워크북·변형문제·서술형) → 지문별 PDF + 통합 PDF.
+저장소: `runs/<세트>`(요약) + `runs/<세트>/passages/<지문>`(전문). 문서 하나 256KiB 제한을 넘지 않게 나눠 둔다.
+AI 동시 호출은 2개까지. rate_limited 등은 줄을 멈추고(halted) '이어서 만들기'로 재개 — 절대 자동 재시도 루프 금지.
 AI가 없는 환경에서는 연습 모드(연출만)로 떨어지며, 이걸 실제 작업처럼 보이게 하지 말 것.
 
 ## 비밀값

@@ -1,6 +1,7 @@
 // 팀별 업무 지시서 — AI에게 보내는 프롬프트.
 // 결과물 형식(제목·표·순서)을 여기서 정하므로, 자료 양식을 바꾸고 싶으면 이 파일을 고치면 된다.
 import { LINKS } from "../../company.config";
+import type { Passage } from "./passages";
 
 export type WorkInput = {
   exam: string;
@@ -10,14 +11,23 @@ export type WorkInput = {
   memo: string;
 };
 
+/** 세트 전체 제작 계획 (자료기획팀) */
 export type Plan = {
   productName: string;
-  topic: string;
-  gist: string;
   difficulty: string;
-  keySentences: string[];
   points: string[];
   summary: string;
+  /** 지문별 주제 — 지문 순서대로 */
+  topics: { label: string; topic: string }[];
+};
+
+/** 세트 정보 — 상세페이지·홍보글에 쓴다 */
+export type SetInfo = {
+  exam: string;
+  grade: string;
+  name: string;
+  plan: Plan | null;
+  labels: string[];
 };
 
 const SITE = LINKS[0]?.href ?? "";
@@ -40,15 +50,10 @@ function head(input: WorkInput, role: string) {
 ${input.passage.trim()}`;
 }
 
-function planLines(plan: Plan | null) {
-  if (!plan) return "";
-  return `
-[자료기획팀 제작 계획]
-- 상품명: ${plan.productName}
-- 주제: ${plan.topic}
-- 요지: ${plan.gist}
-- 출제 포인트: ${plan.points.join(" / ")}
-- 핵심 문장: ${plan.keySentences.join(" / ")}`;
+const PASSAGE_RULE = "- 지문 앞뒤에 문제 발문(예: '다음 글의 주제로…')이나 선택지가 섞여 있으면 지문이 아니므로 무시한다.";
+
+function planLines(topic: string) {
+  return topic ? `\n[자료기획팀 메모] 이 지문의 주제: ${topic}` : "";
 }
 
 export function demandPrompt(input: WorkInput) {
@@ -72,29 +77,37 @@ ${RULES}
 - (3개 이내)`;
 }
 
-export function planPrompt(input: WorkInput, demand: string) {
-  return `${head(input, "자료기획팀장")}
+export function planPrompt(exam: string, grade: string, passages: Passage[], demand: string) {
+  const list = passages.map((p) => `### ${p.label}\n${p.text}`).join("\n\n");
+  return `너는 영어 수업자료 회사 "베르영어"의 자료기획팀장이다. 아래 ${passages.length}개 지문 전체로 '분석지 + 단어장 + 워크북 + 변형문제 + 서술형 대비' 5종 세트를 만든다.
+
+[시험/교재] ${exam || "미입력"}
+[대상] ${grade}
 ${demand ? `\n[수요조사팀 정리]\n${demand}\n` : ""}
-이 지문으로 '분석지 + 단어장 + 워크북 + 변형문제 + 서술형 대비' 5종 세트를 만든다. 제작 계획을 JSON 객체 하나로만 답한다. 다른 글은 쓰지 않는다.
+[지문 전체]
+${list}
+
+제작 계획을 JSON 객체 하나로만 답한다. 다른 글은 쓰지 않는다.
 
 {
-  "productName": "판매용 상품명. 시험·문항·학년이 드러나게, 40자 이내",
-  "topic": "글의 주제, 한국어 한 문장",
-  "gist": "글의 요지, 한국어 한 문장",
-  "difficulty": "상 | 중 | 하 중 하나",
-  "keySentences": ["서술형·빈칸으로 낼 만한 핵심 문장 원문 2~3개"],
-  "points": ["출제 포인트 3개, 각각 25자 이내 한국어"],
-  "summary": "이 세트를 선생님이 사야 하는 이유, 한두 문장"
-}`;
+  "productName": "판매용 상품명. 시험·교재명과 '전 지문 5종 세트'가 드러나게, 40자 이내",
+  "difficulty": "상 | 중 | 하 중 하나 (세트 전체 평균)",
+  "points": ["이 세트의 출제 포인트 3개, 각각 25자 이내 한국어"],
+  "summary": "선생님이 이 세트를 사야 하는 이유, 한두 문장",
+  "topics": [{"label": "지문 번호 그대로", "topic": "그 지문의 주제, 한국어 25자 이내"}]
 }
 
-export function analysisPrompt(input: WorkInput, plan: Plan | null, name: string) {
+topics 는 위 지문 순서 그대로 ${passages.length}개 모두 쓴다.`;
+}
+
+export function analysisPrompt(input: WorkInput, topic: string, name: string) {
   return `${head(input, "분석지 담당")}
-${planLines(plan)}
+${planLines(topic)}
 
 이 지문의 '분석지'를 만든다.
 
 ${RULES}
+${PASSAGE_RULE}
 - 지문의 모든 문장을 빠짐없이, 순서대로 분석한다.
 
 [형식]
@@ -129,6 +142,7 @@ export function vocabPrompt(input: WorkInput, name: string) {
 이 지문의 '단어장'을 만든다.
 
 ${RULES}
+${PASSAGE_RULE}
 - 지문에 나온 순서대로 20~30개. 중학 기초 단어는 빼고, 시험에 나올 만한 단어와 숙어 위주.
 - 품사는 n. v. adj. adv. prep. conj. phr. 로 쓴다. 유의어·반의어가 없으면 — 로 쓴다.
 - 뜻은 사전 첫 뜻이 아니라 이 지문 속 뜻으로 쓴다.
@@ -147,13 +161,14 @@ ${RULES}
 1. (뜻)`;
 }
 
-export function workbookPrompt(input: WorkInput, plan: Plan | null, name: string) {
+export function workbookPrompt(input: WorkInput, topic: string, name: string) {
   return `${head(input, "워크북 담당")}
-${planLines(plan)}
+${planLines(topic)}
 
 이 지문의 '워크북'을 만든다.
 
 ${RULES}
+${PASSAGE_RULE}
 
 [형식]
 # 워크북 — ${name}
@@ -180,13 +195,14 @@ ${RULES}
 1. (모범 해석)`;
 }
 
-export function variantsPrompt(input: WorkInput, plan: Plan | null, name: string) {
+export function variantsPrompt(input: WorkInput, topic: string, name: string) {
   return `${head(input, "변형문제 출제위원")}
-${planLines(plan)}
+${planLines(topic)}
 
 수능·모의고사 형식의 5지선다 변형문제 5문항을 만든다.
 
 ${RULES}
+${PASSAGE_RULE}
 - 문항 구성: 1. 주제 또는 제목 (영어 선택지) / 2. 빈칸 추론 (핵심 개념 자리를 비움, 영어 선택지) / 3. 글의 순서 (주어진 글 다음 (A)(B)(C) 배열) / 4. 문장 삽입 (주어진 문장이 들어갈 곳 ①~⑤) / 5. 어법 (밑줄 ①~⑤ 중 틀린 것 정확히 하나).
 - 순서·삽입·어법 문항은 지문 문장을 그대로 쓴다. 어법 문항은 틀린 곳 하나만 고친다.
 - 정답은 지문 근거로 딱 하나만 성립해야 한다. 정답 번호가 한쪽으로 몰리지 않게 섞는다.
@@ -211,13 +227,14 @@ ${RULES}
 | 1 | ③ | 근거 문장과 오답 이유, 한국어 2~3문장 |`;
 }
 
-export function writingPrompt(input: WorkInput, plan: Plan | null, name: string) {
+export function writingPrompt(input: WorkInput, topic: string, name: string) {
   return `${head(input, "서술형 대비 담당")}
-${planLines(plan)}
+${planLines(topic)}
 
 내신 서술형 대비 문제 4문항과 모범답안·채점기준을 만든다.
 
 ${RULES}
+${PASSAGE_RULE}
 - 모든 문항은 지문 속 문장과 내용에 근거한다.
 
 [형식]
@@ -280,25 +297,31 @@ ${RULES}
 - (고칠 부분 → 고친 결과)`;
 }
 
-function productLines(input: WorkInput, plan: Plan | null, name: string) {
+function productLines(set: SetInfo) {
+  const topics = set.plan?.topics.length
+    ? set.plan.topics.map((t) => `${t.label} ${t.topic}`).join(" / ")
+    : set.labels.join(", ");
   return `[상품]
-- 상품명: ${name}
-- 시험/교재: ${input.exam} ${input.number}
-- 대상: ${input.grade}
-- 주제: ${plan?.topic ?? "(기획 정보 없음)"}
-- 출제 포인트: ${plan?.points.join(" / ") ?? "(기획 정보 없음)"}
-- 판매 포인트: ${plan?.summary ?? ""}
-- 구성: 분석지(문장별 끊어읽기·해석·구문), 단어장(핵심 어휘 + 확인 테스트), 워크북(어휘 빈칸·어법 선택·어순 배열·해석 쓰기), 변형문제 5문항(주제·빈칸·순서·삽입·어법, 해설 포함), 서술형 4문항(모범답안·채점기준 포함)`;
+- 상품명: ${set.name}
+- 시험/교재: ${set.exam}
+- 대상: ${set.grade}
+- 지문 수: ${set.labels.length}개 (${set.labels[0] ?? ""}${set.labels.length > 1 ? ` ~ ${set.labels[set.labels.length - 1]}` : ""})
+- 지문별 주제: ${topics}
+- 출제 포인트: ${set.plan?.points.join(" / ") ?? "(기획 정보 없음)"}
+- 판매 포인트: ${set.plan?.summary ?? ""}
+- 구성 (지문마다 5종): 분석지(문장별 끊어읽기·해석·구문), 단어장(핵심 어휘 + 확인 테스트), 워크북(어휘 빈칸·어법 선택·어순 배열·해석 쓰기), 변형문제 5문항(주제·빈칸·순서·삽입·어법, 해설 포함), 서술형 4문항(모범답안·채점기준 포함)
+- 파일: 지문별 PDF + 전 지문 통합 PDF 1개`;
 }
 
-export function detailPrompt(input: WorkInput, plan: Plan | null, name: string) {
+export function detailPrompt(set: SetInfo) {
+  const name = set.name;
   return `너는 영어 수업자료 회사 "베르영어"의 홈페이지 디자인팀장이다. 판매 사이트(${SITE})에 올릴 상세페이지 문구를 쓴다.
 
-${productLines(input, plan, name)}
+${productLines(set)}
 
 ${RULES}
 - 존댓말. 과장 광고 금지("100% 적중" 같은 표현 금지).
-- 파일 형식·가격·환불 규정은 정해지지 않았으니 [대표 입력] 으로 비워둔다.
+- 파일 형식은 PDF(지문별 + 통합본)다. 가격·환불 규정은 정해지지 않았으니 [대표 입력] 으로 비워둔다.
 
 [형식]
 # 상세페이지 — ${name}
@@ -321,16 +344,17 @@ ${RULES}
 - (2~3개)
 
 ## 이용 안내
-- 파일 형식: [대표 입력]
+- 파일 형식: PDF (지문별 파일 + 전 지문 통합본)
 - 가격: [대표 입력]
 - 환불 규정: [대표 입력]`;
 }
 
-export function promoPrompt(input: WorkInput, plan: Plan | null, name: string, demand: string) {
+export function promoPrompt(set: SetInfo, demand: string) {
+  const name = set.name;
   const blog = LINKS.find((l) => l.href.includes("blog"))?.href ?? "";
   return `너는 영어 수업자료 회사 "베르영어"의 마케팅팀장이다. 네이버 카페(황영카·기출비 — 영어 선생님들이 자료를 찾는 카페)와 네이버 블로그(${blog})에 올릴 홍보글을 쓴다. 게시는 대표가 직접 하니, 바로 붙여넣을 수 있는 완성된 글로 쓴다.
 
-${productLines(input, plan, name)}
+${productLines(set)}
 ${demand ? `\n[수요조사팀 정리]\n${demand}\n` : ""}
 ${RULES}
 - 선생님 대상, 정중하고 담백한 존댓말. 과한 이모지와 과장 표현 금지.
@@ -340,13 +364,13 @@ ${RULES}
 # 홍보글 — ${name}
 ## 카페 홍보글
 ### 제목
-(학년·시험명·문항이 앞에 오게, 45자 이내)
+(학년·시험명이 앞에 오고 '전 지문 5종'이 드러나게, 45자 이내)
 ### 본문
 (300~500자. 구성 소개, 자료 특징 3가지, "견본 파일을 첨부했습니다" 안내, 구매 링크)
 
 ## 블로그 포스팅
 ### 제목
-(시험명·문항·분석지·변형문제·서술형 키워드 포함)
+(시험명·전 지문·분석지·변형문제·서술형 키워드 포함)
 ### 본문
 (600~900자. 소제목 2~3개. 미리보기 이미지 자리는 [이미지: 설명] 으로 표시. 마지막에 구매 링크)
 ### 태그

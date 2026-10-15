@@ -94,7 +94,9 @@ export function parseMarkdown(src: string): Block[] {
       blocks.push({ kind: "quote", runs: inline(trimmed.replace(/^>\s?/, "")) });
       continue;
     }
+    // AI가 쓴 문서는 한 줄에 한 항목(원문 / 해석 …)이라 줄마다 문단으로 둔다
     para.push(trimmed);
+    flush();
   }
   flush();
   return blocks;

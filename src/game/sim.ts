@@ -4,7 +4,20 @@
 import { findPath } from "./pathfinding";
 import { BLOCK_REASON, CEO, DEPT_BRIEF, DEPT_KEYWORDS, DEPT_LEAD, STAFF, type StaffSeed } from "./staff";
 import { TODAY_PICK } from "../../company.config";
-import { SECTION_META, SECTION_ORDER, type RunData, type SectionId, type WorkJob } from "../ai/job";
+import {
+  GLOBAL_META,
+  GLOBAL_ORDER,
+  PART_META,
+  PART_ORDER,
+  type GlobalId,
+  type PartId,
+  type RunData,
+  type WorkJob,
+} from "../ai/job";
+
+/** 팀에 맡기는 실제 일: 세트 전체 결과물(GlobalId) 또는 지문마다 만드는 결과물(PartId) */
+type JobTask = GlobalId | PartId;
+const isPart = (t: JobTask): t is PartId => t in PART_META;
 import {
   CEO_REPORT_SPOT,
   CEO_SEAT,
@@ -135,14 +148,14 @@ const PHASES = [
   "07:00 전사 출근",
   "수요 메모 분석",
   "고객 문의 확인",
-  "지문 진단·제작 계획",
+  "전 지문 진단·제작 계획",
   "계획 보고",
   "대표 승인 대기",
   "분석지·단어장 제작",
   "워크북·변형·서술형 제작",
   "정답·해설 검수",
   "상세페이지·홍보글",
-  "상품 등록 정보",
+  "PDF·등록 정보 정리",
   "비서실 브리핑",
   "업무 종료",
 ];
@@ -183,6 +196,7 @@ export class Company {
   spotlight: string | null = null;
   /** 실제 AI 작업 — 없으면 연습 모드(연출만) */
   job: WorkJob | null = null;
+  private haltLogged = false;
 
   private spotlightUntil = 0;
   private elapsed = 0;
@@ -225,6 +239,7 @@ export class Company {
     this.elapsed = 0;
     this.approvalSince = null;
     this.job = null;
+    this.haltLogged = false;
 
     const seats = new Map<string, Pt[]>();
     for (const room of DEPT_ROOMS) seats.set(room.id, room.desks.map((d) => d.seat));
@@ -418,7 +433,7 @@ export class Company {
     // ⑤ 지문 진단·제작 계획
     this.phaseIndex = 4;
     if (job) {
-      yield* this.runJob("strategy1", "지문 진단 · 5종 세트 제작 계획", ["plan"], () =>
+      yield* this.runJob("strategy1", `지문 ${job.count}개 진단 · 5종 세트 제작 계획`, ["plan"], () =>
         job.plan ? `계획 나왔어요. 난이도 ${job.plan.difficulty}!` : "계획은 실패했지만 지문으로 바로 만들 수 있어요.",
       );
     } else {
@@ -440,69 +455,76 @@ export class Company {
     yield 1.8;
     this.sitAtDesk(planner);
 
-    // ⑦ 대표 승인 회의
+    // ⑦ 대표 승인 회의 (이미 승인하고 제작하던 세트를 이어서 만들 때는 건너뛴다)
     this.phaseIndex = APPROVAL_PHASE;
-    this.deptStatus.strategy2 = "승인 대기";
-    this.approvalPending = true;
-    this.turbo = false; // 대표 결정 지점에서는 즉시 정상 속도로 돌아온다
-    this.meetingTitle = job ? "제작 계획 대표 승인" : "TOP 3 대표 승인";
-    this.pushLog("📋", "대표 승인 대기: 오늘 결정할 안건 1개가 회의실에 올라왔어요.", "yellow");
-
-    const approvers = this.approvers();
     const ceo = this.agentById.get("ceo")!;
-    this.lock([...approvers, ceo]);
-    approvers.forEach((agent, i) => {
-      this.stand(agent);
-      const seat = this.bookSeat(agent, i);
-      this.goto(agent, seat, "회의 중");
-      this.enqueue(agent, { k: "face", dir: seat.y < 7 ? "down" : "up" }, { k: "anim", a: "sit" });
-    });
-    const ceoSeat = this.bookSeat(ceo, 3);
-    this.enqueue(
-      ceo,
-      { k: "anim", a: "idle" },
-      { k: "status", s: "회의 중" },
-      { k: "walk", to: ceoSeat },
-      { k: "face", dir: ceoSeat.y < 7 ? "down" : "up" },
-      { k: "anim", a: "sit" },
-    );
-    yield this.allFree([...approvers, ceo]);
+    if (job?.approvedBefore) {
+      this.approved = true;
+      this.pushLog("✅", "이미 승인된 세트예요 — 남은 자료를 바로 이어서 만듭니다.", "mint");
+      yield 1;
+    } else {
+      this.deptStatus.strategy2 = "승인 대기";
+      this.approvalPending = true;
+      this.turbo = false; // 대표 결정 지점에서는 즉시 정상 속도로 돌아온다
+      this.meetingTitle = job ? "제작 계획 대표 승인" : "TOP 3 대표 승인";
+      this.pushLog("📋", "대표 승인 대기: 오늘 결정할 안건 1개가 회의실에 올라왔어요.", "yellow");
 
-    this.say(
-      approvers[0],
-      job ? `'${job.productName()}' 5종 세트 계획이에요.` : `TOP 1은 '${TODAY_PICK.title}' ${TODAY_PICK.score}점이에요.`,
-      3.4,
-    );
-    yield 2.4;
-    this.say(approvers[1], "승인 나면 분석지부터 바로 들어갈게요.", 3);
-    yield 2.2;
-    this.say(approvers[2], "대표님, 오늘 결정하실 건 이거 하나예요.", 3.2);
-    yield 2.2;
-    this.say(ceo, "확인해볼게요.", 2.4);
+      const approvers = this.approvers();
+      this.lock([...approvers, ceo]);
+      approvers.forEach((agent, i) => {
+        this.stand(agent);
+        const seat = this.bookSeat(agent, i);
+        this.goto(agent, seat, "회의 중");
+        this.enqueue(agent, { k: "face", dir: seat.y < 7 ? "down" : "up" }, { k: "anim", a: "sit" });
+      });
+      const ceoSeat = this.bookSeat(ceo, 3);
+      this.enqueue(
+        ceo,
+        { k: "anim", a: "idle" },
+        { k: "status", s: "회의 중" },
+        { k: "walk", to: ceoSeat },
+        { k: "face", dir: ceoSeat.y < 7 ? "down" : "up" },
+        { k: "anim", a: "sit" },
+      );
+      yield this.allFree([...approvers, ceo]);
 
-    // 대표가 승인 버튼을 누를 때까지 대기
-    yield () => this.approved;
+      this.say(
+        approvers[0],
+        job ? `지문 ${job.count}개, '${job.productName()}' 계획이에요.` : `TOP 1은 '${TODAY_PICK.title}' ${TODAY_PICK.score}점이에요.`,
+        3.4,
+      );
+      yield 2.4;
+      this.say(approvers[1], "승인 나면 분석지부터 바로 들어갈게요.", 3);
+      yield 2.2;
+      this.say(approvers[2], "대표님, 오늘 결정하실 건 이거 하나예요.", 3.2);
+      yield 2.2;
+      this.say(ceo, "확인해볼게요.", 2.4);
 
-    this.approvalPending = false;
-    this.meetingTitle = null;
-    this.say(ceo, "승인! 이대로 갑시다.", 2.8);
-    this.pushLog("✅", job ? "대표 승인 완료 — 5종 세트 제작을 시작합니다." : "대표 승인 완료 — TOP 1 자료 세트 제작을 시작합니다.", "mint");
-    yield 1.6;
-    for (const agent of approvers) {
-      this.releaseSeat(agent);
-      this.stand(agent);
-      this.sitAtDesk(agent);
+      // 대표가 승인 버튼을 누를 때까지 대기
+      yield () => this.approved;
+
+      this.approvalPending = false;
+      this.meetingTitle = null;
+      this.say(ceo, "승인! 이대로 갑시다.", 2.8);
+      this.pushLog("✅", job ? "대표 승인 완료 — 5종 세트 제작을 시작합니다." : "대표 승인 완료 — TOP 1 자료 세트 제작을 시작합니다.", "mint");
+      yield 1.6;
+      for (const agent of approvers) {
+        this.releaseSeat(agent);
+        this.stand(agent);
+        this.sitAtDesk(agent);
+      }
+      this.releaseSeat(ceo);
+      this.enqueue(ceo, { k: "anim", a: "idle" }, { k: "walk", to: CEO_SEAT }, { k: "face", dir: "down" }, { k: "anim", a: "sit" }, { k: "status", s: "업무 중" });
+      yield this.allFree([...approvers, ceo]);
+      this.unlock([...approvers, ceo]);
+
     }
-    this.releaseSeat(ceo);
-    this.enqueue(ceo, { k: "anim", a: "idle" }, { k: "walk", to: CEO_SEAT }, { k: "face", dir: "down" }, { k: "anim", a: "sit" }, { k: "status", s: "업무 중" });
-    yield this.allFree([...approvers, ceo]);
-    this.unlock([...approvers, ceo]);
 
     // ⑧ 분석지·단어장
     this.phaseIndex = 7;
     if (job) {
-      yield* this.runJob("strategy2", "문장별 분석지 + 단어장 작성", ["analysis", "vocab"], () =>
-        this.teamFailed("strategy2") ? "일부 실패했어요. 다시 만들기 눌러주세요." : "분석지·단어장 완성했어요!",
+      yield* this.runJob("strategy2", `전 지문 ${job.count}개 분석지 + 단어장 작성`, ["analysis", "vocab"], () =>
+        this.teamFailed("strategy2") ? "일부 실패했어요. 다시 만들기 눌러주세요." : "전 지문 분석지·단어장 완성했어요!",
       );
     } else {
       yield* this.runDept("strategy2", "구문·해석 분석지 + 단어장 제작", 7, "분석지·단어장 완성! 핵심 구문 표시해뒀어요.");
@@ -514,8 +536,8 @@ export class Company {
     yield* this.deliver("strategy2-lead", "carousel", "서술형 포인트 구문 표시해뒀어요.", "조건 영작부터 만들게요.");
 
     if (job) {
-      this.startJobDept("reels", "워크북 + 변형문제 5문항 출제", ["workbook", "variants"]);
-      this.startJobDept("carousel", "서술형 4문항 + 모범답안·채점기준", ["writing"]);
+      this.startJobDept("reels", `전 지문 워크북 + 변형문제 출제 (${job.count}지문)`, ["workbook", "variants"]);
+      this.startJobDept("carousel", `전 지문 서술형 + 채점기준 (${job.count}지문)`, ["writing"]);
     } else {
       this.startDept("reels", "빈칸 워크북 · 순서·삽입·어법 변형문제", 8);
       this.startDept("carousel", "조건 영작·요약문 + 모범답안·채점기준", 8);
@@ -526,7 +548,7 @@ export class Company {
     // ⑩ 검수
     this.phaseIndex = 9;
     if (job) {
-      yield* this.runJob("qa", "모든 문항 직접 풀어 정답 검증", ["qa"], () =>
+      yield* this.runJob("qa", `전 지문 ${job.count}개 문항 직접 풀어 정답 검증`, ["qa"], () =>
         this.teamFailed("qa") ? "검수가 중간에 끊겼어요." : "검수 끝! 보고서 확인해주세요.",
       );
     } else {
@@ -549,7 +571,7 @@ export class Company {
     // ⑫ 상품 등록 정보 + 정산 (회계는 연동 대기면 건너뜀)
     this.phaseIndex = 11;
     if (job) {
-      this.startJobDept("ops", "상품 코드·파일 이름·시트용 한 줄 정리", ["listing"], 4);
+      this.startJobDept("ops", "PDF 파일 이름·상품 코드·시트용 한 줄 정리", ["listing"], 4);
     } else {
       this.startDept("ops", "시트·관리자페이지 등록 정보 + 최종 파일 정리", 5);
     }
@@ -560,7 +582,7 @@ export class Company {
 
     // ⑬ 비서실 브리핑
     this.phaseIndex = BRIEFING_PHASE;
-    if (job) void job.run("briefing");
+    if (job) void job.runGlobal("briefing", true);
     this.lock([sec]);
     this.stand(sec);
     this.say(sec, "전사 보고 취합했어요. 대표님께 갑니다.", 3);
@@ -613,31 +635,61 @@ export class Company {
   }
 
   /** 실제 AI 작업을 맡겨 끝날 때까지 기다린다 */
-  private *runJob(deptId: string, label: string, ids: SectionId[], report: () => string, minDur = 3) {
-    this.startJobDept(deptId, label, ids, minDur);
+  private *runJob(deptId: string, label: string, tasks: JobTask[], report: () => string, minDur = 3) {
+    this.startJobDept(deptId, label, tasks, minDur);
     yield () => this.deptStatus[deptId] === "완료";
     this.say(this.lead(deptId), report(), 3.2);
     yield 1.2;
   }
 
-  private startJobDept(deptId: string, label: string, ids: SectionId[], minDur = 3) {
+  private startJobDept(deptId: string, label: string, tasks: JobTask[], minDur = 3) {
     const job = this.job!;
-    for (const id of ids) void job.run(id);
+    const parts = tasks.filter(isPart);
+    const globals = tasks.filter((t): t is GlobalId => !isPart(t));
+    if (parts.length) void job.runParts(parts);
+    // 등록 정보·브리핑은 AI 없이 그 자리에서 다시 계산한다
+    for (const g of globals) void job.runGlobal(g, g === "listing" || g === "briefing");
     this.startDept(
       deptId,
       label,
       minDur,
-      () => ids.every((id) => job.isSettled(id)),
-      () => ids.reduce((sum, id) => sum + job.progress(id), 0) / ids.length,
+      () => (!parts.length || job.partsSettled(parts)) && globals.every((g) => job.globalSettled(g)),
+      () => {
+        const pp = parts.length ? job.partsProgress(parts) : 1;
+        const gp = globals.length ? globals.filter((g) => job.globalSettled(g)).length / globals.length : 1;
+        return parts.length && globals.length ? (pp + gp) / 2 : parts.length ? pp : gp;
+      },
     );
   }
 
-  private teamSections(deptId: string) {
-    return SECTION_ORDER.filter((id) => SECTION_META[id].dept === deptId);
+  private teamParts(deptId: string) {
+    return PART_ORDER.filter((id) => PART_META[id].dept === deptId);
+  }
+
+  private teamGlobals(deptId: string) {
+    return GLOBAL_ORDER.filter((id) => GLOBAL_META[id].dept === deptId);
   }
 
   private teamFailed(deptId: string) {
-    return this.teamSections(deptId).some((id) => this.job?.section(id).status === "failed");
+    const job = this.job;
+    if (!job) return false;
+    return (
+      this.teamParts(deptId).some((id) => job.partCount(id, "failed") > 0) ||
+      this.teamGlobals(deptId).some((id) => job.global[id].status === "failed")
+    );
+  }
+
+  /** 팀이 오늘 실제로 만든 것 한 줄 요약 */
+  private teamMade(deptId: string) {
+    const job = this.job!;
+    const parts = this.teamParts(deptId).map((id) => {
+      const failed = job.partCount(id, "failed");
+      return `${PART_META[id].title} ${job.partCount(id, "done")}/${job.count}${failed ? ` (실패 ${failed})` : ""}`;
+    });
+    const globals = this.teamGlobals(deptId)
+      .filter((id) => job.global[id].status !== "idle" && job.global[id].status !== "skipped")
+      .map((id) => `${GLOBAL_META[id].title} ${job.global[id].status === "failed" ? "실패" : "완료"}`);
+    return [...parts, ...globals].join(" · ");
   }
 
   private lead(deptId: string): Agent {
@@ -681,24 +733,19 @@ export class Company {
     this.unlock(this.deptAgents(deptId));
     const lead = DEPT_LEAD[deptId];
     const agent = lead ? this.agentById.get(lead.id) : null;
-    const failed = this.job ? this.teamSections(deptId).filter((id) => this.job!.section(id).status === "failed") : [];
-    if (failed.length) {
-      if (agent) this.say(agent, "일부가 실패했어요…", 2.4);
-      const names = failed.map((id) => SECTION_META[id].title).join("·");
-      this.pushLog("⚠️", `${roomOf(deptId).name}: ${names} 실패 — ${this.job!.section(failed[0]).error}`, "lav");
+    if (this.job) {
+      const job = this.job;
+      const failed = this.teamFailed(deptId);
+      if (agent) this.say(agent, failed ? "일부가 실패했어요…" : "완료했어요!", 2.4);
+      this.pushLog(failed ? "⚠️" : roomOf(deptId).icon, `${roomOf(deptId).name} 끝 — ${this.teamMade(deptId) || "할 일 없음"}`, failed ? "lav" : "mint");
+      if (job.halted && !this.haltLogged) {
+        this.haltLogged = true;
+        this.pushLog("⏸️", `AI 작업이 멈췄어요 — ${job.halted} 남은 일은 결과물 창고에서 '이어서 만들기'로 계속해요.`, "lav");
+      }
       return;
     }
     if (agent) this.say(agent, "완료했어요!", 2.4);
-    const made = this.job
-      ? this.teamSections(deptId)
-          .filter((id) => this.job!.section(id).status === "done")
-          .map((id) => `${SECTION_META[id].title} ${this.job!.section(id).text.length.toLocaleString()}자`)
-      : [];
-    this.pushLog(
-      roomOf(deptId).icon,
-      made.length ? `${roomOf(deptId).name} 완료 — ${made.join(" · ")} 작성` : `${roomOf(deptId).name} 완료 — ${DEPT_BRIEF[deptId].report}`,
-      "mint",
-    );
+    this.pushLog(roomOf(deptId).icon, `${roomOf(deptId).name} 완료 — ${DEPT_BRIEF[deptId].report}`, "mint");
   }
 
   private *runDept(deptId: string, label: string, dur: number, report: string) {
@@ -921,18 +968,9 @@ export class Company {
     const crew = this.deptAgents(deptId);
     const lines: string[] = [];
 
-    const writing = this.job
-      ? this.teamSections(deptId)
-          .map((id) => this.job!.section(id))
-          .filter((sec) => sec.status === "running")
-      : [];
-    if (status === "진행 중" && writing.length) {
-      lines.push(
-        `지금 실제로 쓰는 중이에요: ${writing
-          .map((sec) => `${SECTION_META[sec.id].title} ${sec.text ? `${sec.text.length.toLocaleString()}자` : "(구상 중)"}`)
-          .join(" · ")}`,
-      );
-    } else if (status === "진행 중") {
+    const writingNow = this.job ? this.teamParts(deptId).filter((id) => this.job!.partCount(id, "running") > 0) : [];
+    if (status === "진행 중" && writingNow.length) {
+      lines.push(`지금 실제로 쓰는 중이에요: ${this.teamMade(deptId)}.`);    } else if (status === "진행 중") {
       lines.push(`${this.deptTaskLabel(deptId)} 작업 중이에요. 진행률 ${this.deptProgress(deptId)}%.`);
     } else if (status === "완료") {
       lines.push(`오늘 몫은 끝냈어요. ${DEPT_BRIEF[deptId].report}`);
@@ -1159,7 +1197,7 @@ export class Company {
     const raw = Math.min(rawDt, 0.05);
     const dt = raw * (this.turbo ? TURBO_SPEED : this.speed);
     // 실제 AI 작업을 기다리는 동안은 시계를 천천히 — 몇 분 걸려도 하루가 밤까지 넘어가지 않게
-    const rate = this.job && this.job.pending() > 0 ? SIM_MIN_PER_SEC * 0.2 : SIM_MIN_PER_SEC;
+    const rate = this.job && this.job.pending() > 0 ? SIM_MIN_PER_SEC * 0.02 : SIM_MIN_PER_SEC;
     if (this.running) this.clockMinutes += dt * rate;
 
     this.occupancy.clear();
