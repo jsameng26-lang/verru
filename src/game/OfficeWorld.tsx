@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Agent, Company, DeptStatus, Snapshot } from "./sim";
+import { BRIEFING_PHASE, type Agent, type Company, type DeptStatus, type Snapshot } from "./sim";
 import {
   CEO_ROOM,
   ENTRANCE,
@@ -129,7 +129,7 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
   const hotRoom = useMemo(() => {
     if (snap.spotlight) return snap.spotlight; // 대표 지시로 지목된 방 우선
     if (snap.meetingTitle) return MEETING_ROOM.id;
-    if (snap.phaseIndex >= 11) return CEO_ROOM.id;
+    if (snap.phaseIndex >= BRIEFING_PHASE) return CEO_ROOM.id;
     const working = Object.entries(snap.deptStatus).find(([, status]) => status === "진행 중");
     return working?.[0] ?? null;
   }, [snap.spotlight, snap.meetingTitle, snap.phaseIndex, snap.deptStatus]);

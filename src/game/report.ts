@@ -1,8 +1,8 @@
-// 라이브 오피스의 하루 결과 → 보고서로 변환한다 (발행은 아래 연동 자리에서)
+// 라이브 오피스의 하루 결과 → 일일 브리핑으로 변환한다
 import type { Snapshot } from "./sim";
 import { BLOCK_NEED, DEPT_BRIEF } from "./staff";
 import { roomOf } from "./world";
-import { COMPANY } from "../../company.config";
+import { COMPANY, TODAY_PICK } from "../../company.config";
 
 export type DayReport = {
   title: string;
@@ -16,17 +16,6 @@ export type DayReport = {
   log: { time: string; text: string }[];
 };
 
-export type PublishResult = {
-  notion: { ok: boolean; status: string; detail?: string; url?: string };
-  discord: { ok: boolean; status: string; detail?: string };
-  publishedAt: string;
-};
-
-export type IntegrationStatus = Record<
-  string,
-  { configured: boolean; label: string; need?: string }
->;
-
 export function buildReport(snap: Snapshot): DayReport {
   const entries = Object.entries(snap.deptStatus);
 
@@ -39,14 +28,16 @@ export function buildReport(snap: Snapshot): DayReport {
     .map(([dept]) => `${roomOf(dept).name} — ${BLOCK_NEED[dept] ?? "외부 연동"} 대기로 오늘 진행 불가`);
 
   const decisions = snap.approved
-    ? ["TOP 1 콘텐츠 제작 승인 — 대본·제작까지 진행 완료"]
+    ? [`TOP 1 '${TODAY_PICK.title}' 제작 승인 — 분석지·단어장·워크북·변형·서술형 제작 진행`]
     : snap.approvalPending
-      ? ["TOP 1 콘텐츠 승인 여부 (결재 대기 중)"]
+      ? [`TOP 1 '${TODAY_PICK.title}' 승인 여부 (결재 대기 중)`]
       : ["오늘 대표 결재 안건 없음"];
 
   const next = [
     ...risks.map((risk) => `${risk.split(" — ")[0]}: 연동 완료되면 즉시 재가동`),
-    snap.approved ? "제작된 콘텐츠 업로드 및 성과 기록" : "TOP 3 재검토",
+    ...(snap.approved
+      ? ["사이트·관리자페이지에 자료 업로드 (대표 확인)", "황영카·기출비 카페 + 블로그 홍보글 게시 (대표 직접)"]
+      : ["TOP 3 재검토"]),
   ];
 
   return {
@@ -68,27 +59,24 @@ export function buildReport(snap: Snapshot): DayReport {
   };
 }
 
-// ── 연동 자리 (껍데기) ──────────────────────────────────────
-// 이 버전은 서버 없이 브라우저만으로 돌아갑니다.
-// 그래서 Notion·Discord 등은 전부 "미설정"으로 표시되고, 보고 발행은 실제로 아무 데도 보내지 않아요.
-// 나중에 진짜 연동을 붙일 땐 아래 두 함수만 서버 호출로 바꾸면 됩니다.
-// (예: fetch("/api/report", { method: "POST", body: JSON.stringify(report) }))
-
-export async function publish(report: DayReport): Promise<PublishResult> {
-  void report;
-  return {
-    notion: { ok: false, status: "unconfigured", detail: "미설정 (껍데기 버전)" },
-    discord: { ok: false, status: "unconfigured", detail: "미설정 (껍데기 버전)" },
-    publishedAt: new Date().toISOString(),
-  };
-}
-
-export async function fetchIntegrations(): Promise<IntegrationStatus> {
-  return {
-    notion: { configured: false, label: "Notion 저장" },
-    discord: { configured: false, label: "Discord 전송" },
-    instagram: { configured: false, label: "Instagram 지표", need: "연동 대기" },
-    gmail: { configured: false, label: "Gmail 읽기", need: "연동 대기" },
-    finance: { configured: false, label: "재무 파일", need: "자료 대기" },
-  };
+/** 카톡·노션·메모장 어디든 붙여넣을 수 있는 텍스트 브리핑 */
+export function reportToText(report: DayReport): string {
+  const section = (title: string, items: string[]) =>
+    [`■ ${title}`, ...(items.length ? items.map((item) => `- ${item}`) : ["- 없음"])].join("\n");
+  const { counts } = report;
+  return [
+    `📋 ${report.title}`,
+    `${report.clock} 기준 · ${report.phase}`,
+    `완료 ${counts.done} · 진행 ${counts.working} · 승인 대기 ${counts.approval} · 연동 대기 ${counts.blocked} (전체 ${counts.total}팀)`,
+    "",
+    section("핵심 성과", report.highlights),
+    "",
+    section("대표 결정사항", report.decisions),
+    "",
+    section("문제·위험", report.risks),
+    "",
+    section("다음 우선순위", report.next),
+    "",
+    section("오늘 진행 로그", report.log.map((entry) => `${entry.time} ${entry.text}`)),
+  ].join("\n");
 }

@@ -1,17 +1,12 @@
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import OfficeWorld from "./game/OfficeWorld";
-import {
-  buildReport,
-  fetchIntegrations,
-  publish,
-  type IntegrationStatus,
-  type PublishResult,
-} from "./game/report";
+import { buildReport, reportToText } from "./game/report";
 import { Company, PHASES, type Agent, type DeptStatus, type Snapshot } from "./game/sim";
-import { CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
+import { BLOCK_NEED, CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
-import { COMPANY, STORAGE_LINK } from "../company.config";
+import { LINK_ROWS } from "./links";
+import { COMPANY, RECENT_OUTPUTS, STORAGE_LINK, TODAY_PICK } from "../company.config";
 
 type View = "live" | "dashboard";
 
@@ -23,10 +18,11 @@ const statusClass: Record<DeptStatus, string> = {
   "대기": "waiting",
 };
 
-/** 링크만 걸려 있는 항목 (서버 연동과 무관) */
-const integrations2Static = STORAGE_LINK
-  ? [{ name: "결과물 보관함", status: "링크 연결", tone: "mint", href: STORAGE_LINK }]
-  : [];
+const HEADCOUNT = STAFF.length;
+const SECRETARY = DEPT_LEAD.secretary;
+const BLOCK_NEEDS = Object.values(BLOCK_NEED);
+/** 대표 승인 회의에 올라오는 팀장들 (자료기획 · 분석지 · 비서실) */
+const APPROVERS = [DEPT_LEAD.strategy1, DEPT_LEAD.strategy2, DEPT_LEAD.secretary].map((s) => s.name).join("·");
 
 function todayLabel() {
   const d = new Date();
@@ -64,12 +60,7 @@ export default function Home() {
   const [briefing, setBriefing] = useState(false);
   const [filter, setFilter] = useState<"전체" | DeptStatus>("전체");
   const [toast, setToast] = useState("");
-  const [integrations, setIntegrations] = useState<IntegrationStatus | null>(null);
-  const [publishState, setPublishState] = useState<{ busy: boolean; result: PublishResult | null; error: string }>({
-    busy: false,
-    result: null,
-    error: "",
-  });
+  const [copied, setCopied] = useState(false);
   const publishedRef = useRef(false);
 
   useEffect(() => {
@@ -103,35 +94,20 @@ export default function Home() {
 
   const onSelect = useCallback((agent: Agent) => setSelectedId(agent.id), []);
 
-  // 연동 설정 여부를 서버에서 받아온다 (값이 아니라 설정 여부만)
-  useEffect(() => {
-    fetchIntegrations()
-      .then(setIntegrations)
-      .catch(() => setIntegrations(null));
-  }, []);
-
+  /** 오늘 브리핑을 텍스트로 만들어 클립보드에 복사한다 (카톡·노션 어디든 붙여넣기) */
   const sendReport = useCallback(
     async (auto: boolean) => {
-      setPublishState((state) => ({ ...state, busy: true, error: "" }));
+      if (auto) {
+        engine.pushLog("📋", "오늘 브리핑 정리 완료 — ‘📤 보고 복사’를 누르면 텍스트로 복사돼요", "mint");
+        return;
+      }
       try {
-        const result = await publish(buildReport(engine.snapshot()));
-        setPublishState({ busy: false, result, error: "" });
-
-        const parts: string[] = [];
-        parts.push(result.notion.ok ? "Notion 저장 완료" : `Notion ${result.notion.detail ?? "실패"}`);
-        parts.push(result.discord.ok ? "Discord 전송 완료" : `Discord ${result.discord.detail ?? "실패"}`);
-        engine.pushLog(
-          result.notion.ok && result.discord.ok ? "📤" : "⚠️",
-          `완료 보고 발행 — ${parts.join(" / ")}`,
-          result.notion.ok && result.discord.ok ? "mint" : "lav",
-        );
-        engine.pushChat("staff", "김세리", `보고서 발행 결과입니다.\n· ${parts.join("\n· ")}`);
-        if (!auto) showToast(result.notion.ok || result.discord.ok ? "보고서를 발행했어요" : "발행 실패 — 연동 설정 필요");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setPublishState({ busy: false, result: null, error: message });
-        engine.pushLog("⚠️", `완료 보고 발행 실패 — ${message}`, "lav");
-        if (!auto) showToast("발행 실패 — 연동 설정을 확인해주세요");
+        await navigator.clipboard.writeText(reportToText(buildReport(engine.snapshot())));
+        setCopied(true);
+        engine.pushLog("📤", "오늘 브리핑을 클립보드에 복사했어요", "mint");
+        showToast("브리핑 복사 완료 — 카톡·노션 어디든 붙여넣으세요");
+      } catch {
+        showToast("복사 실패 — 브라우저의 클립보드 권한을 확인해주세요");
       }
     },
     [engine, showToast],
@@ -162,7 +138,7 @@ export default function Home() {
     engine.start();
     setBriefing(false);
     setView("live");
-    showToast("07:00 — AI 직원 32명이 출근합니다 ✨");
+    showToast(`07:00 — AI 직원 ${HEADCOUNT}명이 출근합니다 ✨`);
   };
 
   const approve = () => {
@@ -235,8 +211,7 @@ export default function Home() {
             onApprove={approve}
             onDuty={onDuty}
             onPublish={() => void sendReport(false)}
-            publishBusy={publishState.busy}
-            publishResult={publishState.result}
+            copied={copied}
           />
         ) : (
           <DashboardView
@@ -248,8 +223,6 @@ export default function Home() {
             onStart={start}
             onApprove={approve}
             onSelect={(id) => setSelectedId(id)}
-            integrations={integrations}
-            publishResult={publishState.result}
           />
         )}
 
@@ -292,8 +265,7 @@ function LiveView({
   onApprove,
   onDuty,
   onPublish,
-  publishBusy,
-  publishResult,
+  copied,
 }: {
   engine: Company;
   snap: Snapshot;
@@ -305,8 +277,7 @@ function LiveView({
   onApprove: () => void;
   onDuty: number;
   onPublish: () => void;
-  publishBusy: boolean;
-  publishResult: PublishResult | null;
+  copied: boolean;
 }) {
   const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
 
@@ -314,11 +285,11 @@ function LiveView({
     <>
       <header className="live-hero">
         <div>
-          <p className="eyebrow">LIVE OFFICE · 32 AI STAFF · REAL-TIME</p>
+          <p className="eyebrow">LIVE OFFICE · {HEADCOUNT} AI STAFF · REAL-TIME</p>
           <h1>
             {COMPANY.titlePrefix} <em className="highlight">{COMPANY.titleAccent}</em>
           </h1>
-          <p>출근하고, 자리에서 일하고, 회의실에 모여 회의하고, 대표실로 보고하러 갑니다.</p>
+          <p>수요조사부터 분석지·워크북·변형문제·서술형 제작, 검수, 상세페이지·홍보까지 — 직원들이 출근해서 일하고 대표실로 보고하러 갑니다.</p>
         </div>
         <div className="live-clock">
           <span>SEOUL</span>
@@ -363,12 +334,11 @@ function LiveView({
           🎥 자동 추적 {follow ? "ON" : "OFF"}
         </button>
         <button
-          className={`btn btn-ghost publish-btn ${publishResult?.notion.ok || publishResult?.discord.ok ? "sent" : ""}`}
+          className={`btn btn-ghost publish-btn ${copied ? "sent" : ""}`}
           onClick={onPublish}
-          disabled={publishBusy}
-          title="완료 보고를 Notion에 저장하고 같은 내용을 Discord로 보냅니다"
+          title="오늘 브리핑을 텍스트로 클립보드에 복사합니다"
         >
-          {publishBusy ? "발행 중…" : "📤 보고 발행"}
+          📤 보고 복사
         </button>
         <div className="live-progress">
           <span>
@@ -401,18 +371,18 @@ function LiveView({
               {snap.approvalPending ? (
                 <>
                   <div className="approval-top">
-                    <span className="mini-badge yellow">TOP 1 제안 · 92점</span>
+                    <span className="mini-badge yellow">TOP 1 제안 · {TODAY_PICK.score}점</span>
                     <span className="score blink">결재 대기</span>
                   </div>
-                  <h3>AI 회사가 매일 아침 나 대신 출근한다면?</h3>
-                  <p>회의실에서 최아름·한도빈·김세리가 대표님을 기다리고 있어요.</p>
+                  <h3>{TODAY_PICK.title}</h3>
+                  <p>회의실에서 {APPROVERS}가 대표님을 기다리고 있어요.</p>
                   <div className="reason-list">
-                    <span>① 실제 구축 과정</span>
-                    <span>② 저장할 운영 구조</span>
-                    <span>③ 날것의 시행착오</span>
+                    {TODAY_PICK.reasons.map((reason) => (
+                      <span key={reason}>{reason}</span>
+                    ))}
                   </div>
                   <button className="btn approve-button" onClick={onApprove}>
-                    이 콘텐츠 승인하기
+                    이 자료 세트 승인하기
                   </button>
                 </>
               ) : (
@@ -423,8 +393,8 @@ function LiveView({
                   <h3>{snap.approved ? "승인하신 안으로 제작 중이에요" : "아직 올라온 안건이 없어요"}</h3>
                   <p>
                     {snap.approved
-                      ? "대표 승인 이후 원고 → 제작 → 보관까지 이어집니다."
-                      : "업무를 시작하면 콘텐츠 전략팀이 TOP 3를 회의실로 올려요."}
+                      ? "분석지·단어장 → 워크북·변형·서술형 → 검수 → 상세페이지·홍보 → 등록 준비까지 이어집니다."
+                      : "업무를 시작하면 자료기획팀이 TOP 3를 회의실로 올려요."}
                   </p>
                 </>
               )}
@@ -558,7 +528,7 @@ function CeoConsole({ engine, snap }: { engine: Company; snap: Snapshot }) {
           <input
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
-            placeholder="예: 캐러셀팀 지금 뭐해? / 왜 늦어져?"
+            placeholder="예: 마케팅팀 지금 뭐해? / 왜 늦어져?"
             aria-label="대표 지시 입력"
           />
           <button type="submit">지시</button>
@@ -639,25 +609,25 @@ function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void 
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="김비서 브리핑"
+        aria-label="비서실 브리핑"
       >
         <div className="win-bar">
-          <span>📋 kim_secretary.brief</span>
+          <span>📋 secretary.brief</span>
           <button className="window-close" onClick={onClose}>
             ✕
           </button>
         </div>
         <div className="win-body">
-          <p className="brief-date">{snap.clock} · 김세리 비서실장 최종 브리핑</p>
+          <p className="brief-date">{snap.clock} · {SECRETARY.name} 비서실장 최종 브리핑</p>
           <h3>대표님, 오늘 회사 업무가 정리됐어요.</h3>
           <ul>
             <li>
               <span className="dot green" />
-              완료 {snap.stats.done}팀 — 조사·기획·QA·대본·제작·저장까지 마쳤어요
+              완료 {snap.stats.done}팀 — 수요조사·기획·분석지·워크북·서술형·검수·상세페이지·홍보글까지 마쳤어요
             </li>
             <li>
               <span className="dot green" />
-              대표 승인 1건 반영 — TOP 1 콘텐츠 제작 완료
+              대표 승인 1건 반영 — {TODAY_PICK.title} 제작 완료
             </li>
             <li>
               <span className="dot gray" />
@@ -666,7 +636,7 @@ function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void 
           </ul>
           <div className="decision-box">
             <span className="tiny-label">오늘 대표님이 결정할 것</span>
-            <strong>없습니다. 내일 07:00에 다시 출근할게요 ✨</strong>
+            <strong>사이트 업로드와 카페·블로그 게시만 직접 해주세요. 내일 07:00에 다시 출근할게요 ✨</strong>
           </div>
           <button className="btn btn-primary" onClick={onClose}>
             확인
@@ -697,8 +667,6 @@ function DashboardView({
   onStart,
   onApprove,
   onSelect,
-  integrations,
-  publishResult,
 }: {
   teams: TeamRow[];
   filteredTeams: TeamRow[];
@@ -708,38 +676,8 @@ function DashboardView({
   onStart: () => void;
   onApprove: () => void;
   onSelect: (id: string) => void;
-  integrations: IntegrationStatus | null;
-  publishResult: PublishResult | null;
 }) {
-  // 서버가 알려준 실제 설정 상태로 표시한다 (연결됐다고 거짓 보고하지 않는다)
-  const liveRows = integrations
-    ? [
-        {
-          name: "Notion 저장",
-          status: publishResult?.notion.ok
-            ? "저장 성공"
-            : integrations.notion?.configured
-              ? "키 설정됨"
-              : "키 미설정",
-          tone: publishResult?.notion.ok ? "mint" : integrations.notion?.configured ? "yellow" : "lav",
-          href: "",
-        },
-        {
-          name: "Discord 전송",
-          status: publishResult?.discord.ok
-            ? "전송 성공"
-            : integrations.discord?.configured
-              ? "웹훅 설정됨"
-              : "웹훅 미설정",
-          tone: publishResult?.discord.ok ? "mint" : integrations.discord?.configured ? "yellow" : "lav",
-          href: "",
-        },
-        { name: "Instagram", status: integrations.instagram?.need ?? "연동 대기", tone: "lav", href: "" },
-        { name: "Gmail", status: integrations.gmail?.need ?? "연동 대기", tone: "lav", href: "" },
-        { name: "재무 파일", status: integrations.finance?.need ?? "자료 대기", tone: "lav", href: "" },
-      ]
-    : [];
-  const rows = [...integrations2Static, ...liveRows];
+  const rows = LINK_ROWS;
 
   return (
     <>
@@ -756,13 +694,13 @@ function DashboardView({
             <h1>
               오늘 회사가 어떻게 움직이는지 <em className="highlight">한눈에</em> 보여드려요
             </h1>
-            <p>AI는 비서, 결정은 대표님. 12개 팀 32명의 조사부터 제작·저장·브리핑까지 한 흐름으로 관리해요.</p>
+            <p>AI는 비서, 결정은 대표님. {teams.length}개 팀 {HEADCOUNT}명이 수요조사부터 분석지·단어장·워크북·변형문제·서술형 제작, 검수, 상세페이지·홍보까지 한 흐름으로 움직여요.</p>
           </div>
           <div className="hero-actions">
             <button className="btn btn-primary" onClick={onStart} disabled={snap.running}>
               {snap.running ? "AI 팀원들이 근무 중…" : "오늘 업무 시작하기"}
             </button>
-            <span className="trust-copy">실제 전송·게시·결제는 대표 승인 후 진행해요</span>
+            <span className="trust-copy">사이트 업로드·카페 게시·결제는 대표님이 직접 해요</span>
           </div>
         </div>
       </header>
@@ -770,7 +708,7 @@ function DashboardView({
       <section className="summary-grid" aria-label="오늘 업무 요약">
         <article className="metric yellow">
           <span>AI 직원</span>
-          <strong>32</strong>
+          <strong>{HEADCOUNT}</strong>
           <small>STAFF</small>
         </article>
         <article className="metric mint">
@@ -812,7 +750,7 @@ function DashboardView({
                 <span className="toggle-on">ON</span>
               </div>
               <div className="flow-list">
-                {PHASES.slice(1, 12).map((item, index) => (
+                {PHASES.slice(1, -1).map((item, index) => (
                   <div className={`flow-row ${snap.phaseIndex > index + 1 ? "past" : ""}`} key={item}>
                     <span>{String(index + 1).padStart(2, "0")}</span>
                     <b>{item}</b>
@@ -856,7 +794,7 @@ function DashboardView({
               <div className="section-heading">
                 <div>
                   <p className="eyebrow">LIVE OFFICE</p>
-                  <h2>12개 부서 · 팀장 12명 근무 현황</h2>
+                  <h2>{teams.length}개 부서 · 팀장 {teams.length}명 근무 현황</h2>
                 </div>
                 <div className="filter-tabs" role="group" aria-label="팀 상태 필터">
                   {(["전체", "진행 중", "완료", "승인 대기", "연동 대기"] as const).map((item) => (
@@ -895,27 +833,23 @@ function DashboardView({
               <div className="win-body approval-body">
                 <div className="approval-top">
                   <span className="mini-badge yellow">TOP 1 제안</span>
-                  <span className="score">92점</span>
+                  <span className="score">{TODAY_PICK.score}점</span>
                 </div>
-                <h3>
-                  AI 회사가 매일 아침
-                  <br />
-                  나 대신 출근한다면?
-                </h3>
-                <p>지금 만들고 있는 시스템 자체를 날것의 성장기로 공개하는 크리에이터 아이덴티티 콘텐츠예요.</p>
+                <h3>{TODAY_PICK.title}</h3>
+                <p>{TODAY_PICK.summary}</p>
                 <button
                   className={`btn approve-button ${snap.approved ? "approved" : ""}`}
                   onClick={onApprove}
                   disabled={!snap.approvalPending}
                 >
-                  {snap.approved ? "승인 완료 · 제작팀 전달됨" : snap.approvalPending ? "이 콘텐츠 승인하기" : "대기 중인 안건 없음"}
+                  {snap.approved ? "승인 완료 · 분석지팀 전달됨" : snap.approvalPending ? "이 자료 세트 승인하기" : "대기 중인 안건 없음"}
                 </button>
               </div>
             </section>
 
             <section className="win secretary">
               <div className="win-bar">
-                <span>📋 kim_secretary.brief</span>
+                <span>📋 secretary.brief</span>
                 <span className="window-controls">—　▢　✕</span>
               </div>
               <div className="win-body">
@@ -932,14 +866,14 @@ function DashboardView({
                   </li>
                   <li>
                     <span className="dot gray" />
-                    외부 서비스 연동 대기
+                    {BLOCK_NEEDS.length ? `연동 대기 — ${BLOCK_NEEDS.join(" · ")}` : "연동 대기 없음"}
                   </li>
                 </ul>
                 <div className="decision-box">
                   <span className="tiny-label">대표님이 오늘 결정할 1개</span>
                   <strong>
                     {snap.approvalPending
-                      ? "TOP 1 콘텐츠를 제작할지 승인해주세요."
+                      ? "TOP 1 자료 세트를 제작할지 승인해주세요."
                       : snap.approved
                         ? "결정 완료! 제작팀이 다음 업무를 진행해요."
                         : "아직 올라온 안건이 없어요."}
@@ -964,7 +898,7 @@ function DashboardView({
             </div>
             {STORAGE_LINK ? (
               <a className="btn btn-small" href={STORAGE_LINK} target="_blank" rel="noreferrer">
-                보관함 열기
+                사이트 열기
               </a>
             ) : null}
           </div>
@@ -975,24 +909,20 @@ function DashboardView({
               <span>상태</span>
               <span>바로가기</span>
             </div>
-            <div className="result-row">
-              <b>이번 주 콘텐츠 캘린더 정리</b>
-              <span>기획 1팀</span>
-              <span className="status-pill done">최종 완료</span>
-              <span>—</span>
-            </div>
-            <div className="result-row">
-              <b>브랜드 템플릿 세팅</b>
-              <span>이미지 제작팀</span>
-              <span className="status-pill done">최종 완료</span>
-              <span>—</span>
-            </div>
+            {RECENT_OUTPUTS.map((item) => (
+              <div className="result-row" key={item.title}>
+                <b>{item.title}</b>
+                <span>{item.team}</span>
+                <span className="status-pill done">{item.status}</span>
+                <span>—</span>
+              </div>
+            ))}
           </div>
         </div>
       </section>
 
       <p className="dash-note">
-        대표 {CEO.name}({CEO.callsign}) · AI 직원 {teams.length}개 부서 32명 · 이 화면은 라이브 오피스와 같은 상태를
+        대표 {CEO.name}({CEO.callsign}) · AI 직원 {teams.length}개 부서 {HEADCOUNT}명 · 이 화면은 라이브 오피스와 같은 상태를
         공유해요.
       </p>
     </>

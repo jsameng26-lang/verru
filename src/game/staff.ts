@@ -79,4 +79,17 @@ export const DEPT_BRIEF: Record<string, { task: string; report: string }> = Obje
 );
 
 /** 아직 외부 연동이 안 붙은 부서 → 화면에 "연동 대기"로 표시 */
-export const BLOCK_NEED: Record<string, string> = PENDING_INTEGRATIONS;
+export const BLOCK_NEED: Record<string, string> = Object.fromEntries(
+  Object.entries(PENDING_INTEGRATIONS).map(([dept, p]) => [dept, p.need]),
+);
+
+/** 연동 대기 부서가 멈춰 있는 진짜 이유 */
+export const BLOCK_REASON: Record<string, string> = Object.fromEntries(
+  Object.entries(PENDING_INTEGRATIONS).map(([dept, p]) => [dept, p.reason]),
+);
+
+/** 지시창에서 부서를 찾을 때 쓰는 단어 — 부서 이름 + config 의 keywords */
+export const DEPT_KEYWORDS: [string, string[]][] = DEPARTMENTS.map((d) => [
+  d.id,
+  [d.name, d.name.replace(/팀$/, ""), ...d.keywords].map((word) => word.toLowerCase()),
+]);
