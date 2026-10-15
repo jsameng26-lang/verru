@@ -227,7 +227,9 @@ export default function OfficeWorld({ engine, snap, selectedId, follow, onSelect
           const fill = bar.firstElementChild as HTMLElement;
           const show = agent.anim === "type" ? "1" : "0";
           if (bar.style.opacity !== show) bar.style.opacity = show;
-          if (show === "1") fill.style.width = `${Math.round(agent.progress * 100)}%`;
+          const indet = agent.progress < 0;   // 진행률을 모르는 일(제작 세션): 움직이는 막대만
+          if (bar.classList.contains("indet") !== indet) bar.classList.toggle("indet", indet);
+          if (show === "1" && !indet) fill.style.width = `${Math.round(agent.progress * 100)}%`;
         }
       }
       raf = requestAnimationFrame(paint);

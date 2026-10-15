@@ -2,7 +2,7 @@ import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import OfficeWorld from "./game/OfficeWorld";
 import { buildReport, reportToText } from "./game/report";
-import { Company, PHASES, type Agent, type DeptStatus, type Snapshot } from "./game/sim";
+import { Company, PHASES, PROD_STAGE_TEXT, type Agent, type DeptStatus, type ProductionView, type Snapshot } from "./game/sim";
 import { BLOCK_NEED, CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { LINK_ROWS } from "./links";
@@ -131,6 +131,8 @@ export default function Home() {
   const [remote, setRemote] = useState<RemoteState>("checking");
   const [mcp, setMcp] = useState<Mcp | null>(null);
   const [prodStore, setProdStore] = useState<ProductionStore | null>(null);
+  /** 제작실 세션 단계 → 해당 부서 직원들이 출근해 일한다 */
+  const onProduction = useCallback((view: ProductionView | null) => engine.setProduction(view), [engine]);
 
   useEffect(() => {
     let alive = true;
@@ -474,7 +476,9 @@ export default function Home() {
             onOpenDoc={(ref) => snap.job && setDoc({ runId: snap.job.id, ref })}
             onOpenSet={() => snap.job && setOpenSet({ id: snap.job.id, data: null })}
             onStopWork={() => engine.job?.cancel()}
-            production={<ProductionRoom remote={remote} mcp={mcp} store={prodStore} order={order} parsed={parsed} />}
+            production={
+              <ProductionRoom remote={remote} mcp={mcp} store={prodStore} order={order} parsed={parsed} onActivity={onProduction} />
+            }
           />
         ) : (
           <DashboardView
@@ -633,6 +637,8 @@ function LiveView({
 }) {
   const pick = pickFor(snap.job);
   const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
+  // 하루 업무가 없을 때 제작실 세션이 돌고 있으면 그 단계를 보여 준다
+  const phaseText = !snap.running && snap.production ? `🏭 제작실 · ${PROD_STAGE_TEXT[snap.production.stage]}` : snap.phase;
 
   return (
     <>
@@ -647,7 +653,7 @@ function LiveView({
         <div className="live-clock">
           <span>SEOUL</span>
           <b>{snap.clock}</b>
-          <small>{snap.phase}</small>
+          <small>{phaseText}</small>
         </div>
       </header>
 
@@ -695,7 +701,8 @@ function LiveView({
         </button>
         <div className="live-progress">
           <span>
-            {snap.phase} · {progress}%
+            {phaseText}
+            {!snap.running && snap.production ? "" : ` · ${progress}%`}
           </span>
           <i>
             <b style={{ width: `${progress}%` }} />

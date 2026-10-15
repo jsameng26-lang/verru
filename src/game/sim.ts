@@ -141,6 +141,8 @@ export type Snapshot = {
   busyWithOrder: boolean;
   /** 실제 작업 중인 지문 세트 (연습 모드면 null) */
   job: RunData | null;
+  /** 제작실 세션 진행 (없으면 null) */
+  production: ProductionView | null;
 };
 
 const PHASES = [
@@ -164,6 +166,55 @@ const PHASES = [
 export const APPROVAL_PHASE = PHASES.indexOf("대표 승인 대기");
 /** 비서실장이 대표실로 최종 보고하러 가는 단계 */
 export const BRIEFING_PHASE = PHASES.indexOf("비서실 브리핑");
+
+/**
+ * 제작실(Claude Code 세션)의 실제 진행 단계. 사무실은 이 단계를 그대로 보여 줄 뿐, 진행률을 지어내지 않는다.
+ * check 판매 파일 확인 · making 5종 제작 · question 교체 확인 대기 · report 승인 요청 도착
+ * uploading 드라이브 등록 · done 등록 끝 · blocked 세션이 대표 확인 대기 · stopped 멈춤/중단
+ */
+export type ProductionStage = "check" | "making" | "question" | "report" | "uploading" | "done" | "blocked" | "stopped";
+export type ProductionView = { id: string; title: string; stage: ProductionStage; summary: string };
+
+/** 단계마다 자리에서 일하는 부서 [부서 id, 하는 일] */
+const PROD_CREW: Record<ProductionStage, [string, string][]> = {
+  check: [["ops", "판매 파일 드라이브 확인"]],
+  making: [
+    ["strategy1", "원문 정리 · 세트 폴더 준비"],
+    ["strategy2", "전 지문 분석지 · 단어장"],
+    ["reels", "워크북 · 변형문제 20제"],
+    ["carousel", "서술형 대비 · 채점 기준"],
+    ["qa", "문항 풀이 검수"],
+  ],
+  question: [],
+  report: [],
+  uploading: [
+    ["ops", "드라이브 상품 폴더에 PDF 올리기"],
+    ["review", "홈페이지 구매 가능 반영"],
+  ],
+  done: [],
+  blocked: [],
+  stopped: [],
+};
+
+/** 대표실로 보고하러 오는 사람과 할 말 */
+const PROD_REPORT: Partial<Record<ProductionStage, [string, string]>> = {
+  question: ["ops", "대표님, 이 회차는 판매 파일이 이미 있어요. 교체할까요?"],
+  report: ["secretary", "5종 세트 완성했어요! 제작실에서 확인하고 승인해 주세요."],
+  done: ["secretary", "드라이브 등록 끝났어요. 이제 주문 오면 새 파일이 나가요."],
+  blocked: ["secretary", "제작 세션이 대표님 확인을 기다려요. '세션 열기'로 봐 주세요."],
+  stopped: ["secretary", "제작 세션이 멈췄어요."],
+};
+
+export const PROD_STAGE_TEXT: Record<ProductionStage, string> = {
+  check: "판매 파일 확인 중",
+  making: "5종 세트 제작 중",
+  question: "교체할지 대표 확인 대기",
+  report: "승인 요청 도착",
+  uploading: "드라이브 등록 중",
+  done: "판매 등록 끝",
+  blocked: "세션이 대표 확인 대기",
+  stopped: "멈춤",
+};
 
 /** 연동 대기 부서 — company.config.ts 의 PENDING_INTEGRATIONS */
 const BLOCKED_DEPTS = new Set(Object.keys(BLOCK_REASON));
@@ -196,6 +247,14 @@ export class Company {
   spotlight: string | null = null;
   /** 실제 AI 작업 — 없으면 연습 모드(연출만) */
   job: WorkJob | null = null;
+  /** 제작실 세션의 지금 단계 — 직원들이 이 단계에 맞춰 출근해 일한다 */
+  production: ProductionView | null = null;
+  private prodKey = "";
+  private prodSummary = "";
+  private prodTimer = 0;
+  private prod: Slot = { gen: null, wait: 0, until: null };
+  /** 앞 보고가 끝나면 이어서 할 보고 [부서, 말, 단계 키] */
+  private prodNext: [string, string, string] | null = null;
   private haltLogged = false;
 
   private spotlightUntil = 0;
@@ -230,6 +289,8 @@ export class Company {
     this.meetingTitle = null;
     this.main = { gen: null, wait: 0, until: null };
     this.side = { gen: null, wait: 0, until: null };
+    this.prod = { gen: null, wait: 0, until: null };   // 직원을 새로 세우므로 보고 장면도 새로(제작 단계는 그대로 따라감)
+    this.prodNext = null;
     this.seatBook.clear();
     this.locked.clear();
     this.chat = [];
@@ -1161,6 +1222,82 @@ export class Company {
     return staff?.deptId ?? null;
   }
 
+  // ── 제작실 세션 ─────────────────────────────────────────
+  /** 제작실이 본 세션 상태를 받는다. 단계가 바뀌면 일하는 부서가 바뀌고, 보고할 일이 있으면 대표실로 온다 */
+  setProduction(view: ProductionView | null) {
+    const key = view ? `${view.id}:${view.stage}` : "";
+    this.production = view;
+    if (view && view.summary && view.summary !== this.prodSummary && view.stage === "making") {
+      // 세션이 바꿔 쓴 '지금 하는 일'을 그 일을 맡은 팀장이 말한다
+      const dept = this.matchDept(view.summary) ?? "strategy2";
+      const lead = this.lead(PROD_CREW.making.some(([d]) => d === dept) ? dept : "strategy2");
+      if (lead.status !== "출근 전") this.say(lead, view.summary.slice(0, 60), 4);
+    }
+    this.prodSummary = view?.summary ?? "";
+    if (key === this.prodKey) return;
+    this.prodKey = key;
+    if (!view) return;
+    const active = new Set(PROD_CREW[view.stage].map(([d]) => d));
+    if (!this.running) {
+      // 하루 업무가 없을 때는 제작실 단계가 부서 상태판을 쓴다
+      for (const [deptId] of Object.values(PROD_CREW).flat()) {
+        if (active.has(deptId)) this.deptStatus[deptId] = "진행 중";
+        else if (this.deptStatus[deptId] === "진행 중") this.deptStatus[deptId] = "완료";
+      }
+    }
+    this.pushLog("🏭", `제작실 · ${view.title}: ${PROD_STAGE_TEXT[view.stage]}`, view.stage === "stopped" || view.stage === "blocked" ? "lav" : "mint");
+    const report = PROD_REPORT[view.stage];
+    this.prodNext = report ? [report[0], report[1], key] : null;
+  }
+
+  /** 지금 단계에 일할 부서 직원 중 손이 빈 사람을 자리로 불러 일을 맡긴다(출근 전이면 출근부터) */
+  private staffProduction() {
+    const view = this.production;
+    if (!view) return;
+    const key = this.prodKey;
+    const still = () => this.prodKey === key;
+    for (const [deptId, label] of PROD_CREW[view.stage]) {
+      for (const agent of this.deptAgents(deptId)) {
+        if (this.locked.has(agent.id) || this.busy(agent)) continue;   // 하루 업무 장면·커피 중이면 끝나고
+        if (agent.status === "출근 전") {
+          this.enqueue(agent, { k: "status", s: "출근 중" }, { k: "fn", fn: () => this.say(agent, rand(["제작 들어갑니다!", "자리로 갈게요", "바로 시작할게요"]), 2.4) });
+        }
+        this.enqueue(
+          agent,
+          { k: "walk", to: agent.home },
+          { k: "face", dir: "up" },
+          { k: "status", s: "업무 중" },
+          { k: "work", dur: 1.5, label: `제작실 · ${label}`, until: () => !still() },
+          { k: "anim", a: "sit" },
+          { k: "status", s: "대기" },
+        );
+      }
+    }
+  }
+
+  /** 보고 담당이 대표실에 와서 한마디 하고 돌아간다 */
+  private *prodReportScene(deptId: string, line: string, key: string): Generator<number | (() => boolean), void, void> {
+    const who = this.lead(deptId);
+    yield () => !this.locked.has(who.id);   // 하루 업무 장면에 묶여 있으면 끝나고
+    if (this.prodKey !== key) return;
+    this.lock([who]);
+    if (who.status === "출근 전") this.enqueue(who, { k: "status", s: "출근 중" });
+    this.stand(who);
+    this.goto(who, CEO_REPORT_SPOT, "보고 중");
+    this.enqueue(who, { k: "face", dir: "up" });
+    yield this.allFree([who]);
+    if (this.prodKey === key) {   // 걸어오는 사이에 단계가 바뀌었으면 지난 소식은 말하지 않는다
+      who.anim = "talk";
+      this.say(who, line, 5);
+      this.pushLog("📋", `${who.name}: “${line}”`, "pink");
+      yield 4;
+    }
+    who.anim = "idle";
+    this.sitAtDesk(who);
+    yield this.allFree([who]);
+    this.unlock([who]);
+  }
+
   // ── 대표 액션 ────────────────────────────────────────────
   approve() {
     if (!this.approvalPending) return;
@@ -1208,6 +1345,17 @@ export class Company {
     for (const agent of this.agents) this.stepAgent(agent, dt);
     this.runSlot(this.main, dt);
     this.runSlot(this.side, dt);
+    if (!this.prod.gen && this.prodNext) {
+      const [deptId, line, key] = this.prodNext;
+      this.prodNext = null;
+      if (key === this.prodKey) this.prod.gen = this.prodReportScene(deptId, line, key);
+    }
+    this.runSlot(this.prod, dt);
+    this.prodTimer -= dt;
+    if (this.production && this.prodTimer <= 0) {
+      this.prodTimer = 0.5;
+      this.staffProduction();
+    }
 
     this.elapsed += dt;
     if (this.spotlight && this.elapsed > this.spotlightUntil) this.spotlight = null;
@@ -1275,7 +1423,8 @@ export class Company {
         agent.anim = "type";
         agent.taskLabel = action.label;
         if (action.until) {
-          agent.progress = Math.min(0.97, action.progress?.() ?? 0);
+          // 진행률을 알 수 없는 일(제작 세션)은 -1 = '하는 중' 표시만
+          agent.progress = action.progress ? Math.min(0.97, action.progress()) : -1;
           if (agent.timer >= action.dur && action.until()) {
             agent.progress = 1;
             agent.current = null;
@@ -1441,6 +1590,7 @@ export class Company {
       spotlight: this.spotlight,
       busyWithOrder: this.side.gen !== null,
       job: this.job?.data() ?? null,
+      production: this.production,
     };
   }
 }

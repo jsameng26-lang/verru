@@ -1,39 +1,51 @@
 // 제작실 — 판매용 5종 세트를 검증된 제작기(Claude Code 세션)에 맡기고, 지켜보고, 승인하는 창
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { mcpErrorText, type Mcp } from "./ai/claude";
 import type { OrderInput } from "./ai/job";
 import type { Passage } from "./ai/passages";
 import {
   REMOTE,
+  REPLACE_MARK,
   fetchReport,
   listEnvironments,
   refreshSession,
   sendApproval,
+  sendReplace,
   sessionUrl,
+  stageOf,
   startProduction,
   suggestSetName,
   validSetName,
   watchSession,
-  type Bucket,
   type Environment,
   type Production,
   type ProductionStore,
   type SessionState,
 } from "./ai/remote";
+import type { ProductionStage, ProductionView } from "./game/sim";
 import { MarkdownView } from "./Work";
 
 export type RemoteState = "checking" | "ready" | "off";
 
 const ENV_KEY = "verru-production-env";
 
-const BUCKET: Record<Bucket, { cls: string; text: string }> = {
-  working: { cls: "working", text: "제작 중" },
+const STAGE: Record<ProductionStage | "unknown", { cls: string; text: string }> = {
+  check: { cls: "working", text: "판매 파일 확인 중" },
+  making: { cls: "working", text: "5종 세트 제작 중" },
+  question: { cls: "approval", text: "교체할지 확인 필요" },
+  report: { cls: "approval", text: "보고 도착" },
+  uploading: { cls: "working", text: "판매 등록 중" },
+  done: { cls: "done", text: "판매 등록 보고 도착" },
   blocked: { cls: "blocked", text: "세션에서 확인 필요" },
-  review_ready: { cls: "approval", text: "보고 도착" },
-  completed: { cls: "done", text: "보고 도착" },
-  failed: { cls: "blocked", text: "멈춤" },
+  stopped: { cls: "blocked", text: "멈춤" },
   unknown: { cls: "waiting", text: "확인 중" },
 };
+
+/** 아직 진행 중인 단계 — 진행 중인 게 없으면 가장 최근 제작의 마지막 단계(등록 끝·멈춤)를 보여 준다 */
+const LIVE_STAGES = new Set<ProductionStage>(["check", "making", "question", "report", "uploading", "blocked"]);
+
+/** 보냈는지 알 수 없는 실패 — 다시 보내지 말고 세션에서 확인하게 한다 */
+const ambiguous = (e: unknown) => ["server_unavailable", "upstream_error", "cancelled"].includes((e as { code?: string })?.code ?? "");
 
 function stamp(ms: number) {
   const d = new Date(ms);
@@ -51,21 +63,28 @@ function readEnv() {
 function ProductionRow({
   mcp,
   prod,
-  onApproved,
+  onSave,
   onRemove,
   onReport,
+  onView,
 }: {
   mcp: Mcp;
   prod: Production;
-  onApproved: (p: Production) => void;
+  onSave: (p: Production) => void;
   onRemove: (p: Production) => void;
   onReport: (p: Production, text: string) => void;
+  onView: (id: string, view: ProductionView | null) => void;
 }) {
   const [state, setState] = useState<SessionState | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
   const [approving, setApproving] = useState(false);
   const [note, setNote] = useState("");
+  const looked = useRef("");
+  /** 답·승인을 보낸 뒤 세션이 다시 '작업 중'이 되기 전까지 */
+  const [resuming, setResuming] = useState(false);
+  /** 세션이 멈춘 뒤 보고 첫 줄(교체 확인인지)을 본 상태 키 — 보기 전에는 '보고 도착'을 알리지 않는다 */
+  const [checked, setChecked] = useState("");
 
   useEffect(
     () =>
@@ -73,14 +92,38 @@ function ProductionRow({
         if (s) {
           setState(s);
           setError("");
+          if (s.bucket === "working") setResuming(false);
         } else setError(mcpErrorText(err, REMOTE));
       }),
     [mcp, prod.sessionId],
   );
 
-  const bucket = state?.bucket ?? "unknown";
-  const chip = BUCKET[bucket];
-  const working = bucket === "working";
+  const stage = stageOf(prod, state, resuming);
+  const stateKey = state ? `${state.bucket}:${state.summary}` : "";
+  const settled = stage !== "report" || Boolean(prod.replace) || checked === stateKey;
+  const chip = STAGE[stage ?? "unknown"];
+  const working = state?.bucket === "working";
+
+  // 사무실 직원들이 이 세션 단계를 따라 움직이게 알린다
+  useEffect(() => {
+    onView(prod.id, stage && settled ? { id: prod.id, title: prod.title || prod.id, stage, summary: state?.summary ?? "" } : null);
+  }, [onView, prod.id, prod.title, stage, settled, state?.summary]);
+  useEffect(() => () => onView(prod.id, null), [onView, prod.id]);
+
+  // 세션이 멈췄는데 아직 승인 전·교체 답 전이면 보고 첫 줄을 한 번 본다 — '[교체 확인]'이면 질문을 띄운다
+  useEffect(() => {
+    if (!state || state.bucket === "working" || state.bucket === "unknown") return;
+    if (prod.approvedAt || prod.replace) return;
+    const key = `${state.bucket}:${state.summary}`;
+    if (looked.current === key) return;
+    looked.current = key;
+    fetchReport(mcp, prod.sessionId)
+      .then((text) => {
+        if (text.includes(REPLACE_MARK)) onSave({ ...prod, replace: "asked", replaceInfo: text.slice(0, 1200) });
+      })
+      .catch(() => undefined)   // 못 읽으면 '최근 보고 보기'로 직접 확인
+      .finally(() => setChecked(key));
+  }, [mcp, prod, state, onSave]);
 
   const openReport = async () => {
     setBusy("report");
@@ -98,28 +141,38 @@ function ProductionRow({
     setBusy("approve");
     try {
       await sendApproval(mcp, prod, note);
-      onApproved({ ...prod, approvedAt: Date.now(), approveNote: note.trim() });
+      setResuming(true);
+      onSave({ ...prod, approvedAt: Date.now(), approveNote: note.trim() });
       setApproving(false);
       void refreshSession(mcp, prod.sessionId);
     } catch (e) {
-      const code = (e as { code?: string })?.code;
-      // 보냈는지 알 수 없는 실패는 다시 보내지 말고 세션에서 확인하게 한다
-      setError(
-        code === "server_unavailable" || code === "upstream_error" || code === "cancelled"
-          ? "승인 메시지가 전해졌는지 알 수 없어요. 세션을 열어 확인한 뒤, 안 왔으면 다시 눌러 주세요."
-          : mcpErrorText(e, REMOTE),
-      );
+      setError(ambiguous(e) ? "승인 메시지가 전해졌는지 알 수 없어요. 세션을 열어 확인한 뒤, 안 왔으면 다시 눌러 주세요." : mcpErrorText(e, REMOTE));
     } finally {
       setBusy("");
     }
   };
 
+  const answer = async (yes: boolean) => {
+    if (!yes && !window.confirm("이 회차는 만들지 않을까요? 드라이브의 지금 파일은 그대로 둬요.")) return;
+    setBusy(yes ? "yes" : "no");
+    try {
+      await sendReplace(mcp, prod, yes);
+      if (yes) setResuming(true);
+      onSave({ ...prod, replace: yes ? "yes" : "no" });
+      void refreshSession(mcp, prod.sessionId);
+    } catch (e) {
+      setError(ambiguous(e) ? "답이 전해졌는지 알 수 없어요. 세션을 열어 확인한 뒤, 안 왔으면 다시 눌러 주세요." : mcpErrorText(e, REMOTE));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const asking = prod.replace === "asked" && !working;
+
   return (
     <li className="prod-row">
       <div className="prod-head">
-        <em className={`status-pill ${prod.approvedAt && working ? "working" : chip.cls}`}>
-          {prod.approvedAt && working ? "판매 등록 중" : chip.text}
-        </em>
+        <em className={`status-pill ${chip.cls}`}>{chip.text}</em>
         <b>{prod.title || prod.id}</b>
         <small>
           sets/{prod.id} · 지문 {prod.count}개 · {stamp(prod.createdAt)} 시작
@@ -130,8 +183,26 @@ function ProductionRow({
       </div>
       {state?.summary ? <p className="prod-summary">{state.summary}</p> : null}
       {error ? <p className="prod-error">{error}</p> : null}
-      {bucket === "blocked" ? (
+      {stage === "blocked" ? (
         <p className="prod-hint">세션이 대표님 확인을 기다려요(권한 허락이나 질문). ‘세션 열기’에서 답해 주세요.</p>
+      ) : null}
+      {prod.replace === "no" ? <p className="prod-hint">만들지 않기로 했어요. 드라이브의 파일은 그대로예요.</p> : null}
+      {asking ? (
+        <div className="prod-approve prod-question">
+          <p>
+            <b>📦 이 회차는 판매 파일 드라이브에 이미 파일이 있어요.</b> 새 5종 자료로 다시 만들까요? 만든 뒤에도 ‘승인 →
+            판매 등록’을 누르기 전까지는 지금 파일이 그대로 팔려요(교체하면 예전 파일은 ‘_이전 파일’ 폴더로 옮겨져요).
+          </p>
+          {prod.replaceInfo ? <MarkdownView source={prod.replaceInfo} /> : null}
+          <div className="prod-actions">
+            <button className="btn btn-small" onClick={() => void answer(true)} disabled={busy !== ""}>
+              {busy === "yes" ? "보내는 중…" : "교체해서 5종으로 새로 만들기"}
+            </button>
+            <button className="text-button" onClick={() => void answer(false)} disabled={busy !== ""}>
+              {busy === "no" ? "보내는 중…" : "만들지 않기"}
+            </button>
+          </div>
+        </div>
       ) : null}
       <div className="prod-actions">
         <button className="text-button" onClick={openReport} disabled={busy !== ""}>
@@ -142,7 +213,7 @@ function ProductionRow({
         </button>
         {prod.approvedAt ? (
           <span className="prod-approved">✅ {stamp(prod.approvedAt)} 승인 — 드라이브 등록을 맡겼어요</span>
-        ) : (
+        ) : prod.replace === "no" || asking ? null : (
           <button
             className="btn btn-small"
             onClick={() => setApproving(!approving)}
@@ -188,14 +259,18 @@ export function ProductionRoom({
   store,
   order,
   parsed,
+  onActivity,
 }: {
   remote: RemoteState;
   mcp: Mcp | null;
   store: ProductionStore | null;
   order: OrderInput;
   parsed: Passage[];
+  /** 사무실 직원들이 따라 움직일 제작 세션(가장 최근의 진행 중인 것) */
+  onActivity?: (view: ProductionView | null) => void;
 }) {
   const [list, setList] = useState<Production[]>([]);
+  const [views, setViews] = useState<Record<string, ProductionView>>({});
   const [envs, setEnvs] = useState<Environment[] | null>(null);
   const [envId, setEnvId] = useState(readEnv);
   const [setName, setSetName] = useState("");
@@ -209,9 +284,31 @@ export function ProductionRoom({
     return store.subscribe(setList, () => setError("제작 기록을 불러오지 못했어요."));
   }, [store]);
 
+  const onView = useCallback((id: string, view: ProductionView | null) => {
+    setViews((prev) => {
+      const old = prev[id];
+      if (!view) {
+        if (!old) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      }
+      if (old && old.stage === view.stage && old.summary === view.summary && old.title === view.title) return prev;
+      return { ...prev, [id]: view };
+    });
+  }, []);
+
+  // 목록은 최근 것부터 — 진행 중인 세션 중 가장 최근 것을 사무실에 보여 준다
+  const active = list.map((p) => views[p.id]).find((v) => v && LIVE_STAGES.has(v.stage)) ?? (list[0] && views[list[0].id]) ?? null;
+  const activeKey = active ? `${active.id}:${active.stage}:${active.summary}` : "";
+  useEffect(() => {
+    onActivity?.(active);
+  }, [activeKey, onActivity]);   // activeKey가 같으면 active도 같은 내용
+
   const suggested = suggestSetName(order.exam, order.grade);
   const name = touched ? setName : suggested;
-  const duplicate = list.some((p) => p.id === name);
+  // 끝난 제작(판매 등록 승인 · 만들지 않기)과 같은 묶음은 다시 맡길 수 있다(기록을 새 세션으로 바꿈)
+  const duplicate = list.some((p) => p.id === name && !p.approvedAt && p.replace !== "no");
 
   const loadEnvs = async () => {
     if (!mcp) return;
@@ -268,7 +365,7 @@ export function ProductionRoom({
     !order.exam.trim() && "작업 지시서에 시험·교재 이름을 넣어 주세요",
     !parsed.length && "작업 지시서에 전 지문을 붙여넣어 주세요",
     !validSetName(name) && "묶음 폴더 이름은 영어 소문자·숫자·- 로 (예: 2026-10-g2)",
-    duplicate && "같은 묶음 폴더로 이미 시작했어요 — 이름을 바꾸거나 아래 목록에서 이어서 보세요",
+    duplicate && "같은 묶음 폴더로 진행 중인 제작이 있어요 — 아래 목록에서 이어서 보세요",
     !envId && "실행 환경을 골라 주세요",
   ].filter(Boolean) as string[];
 
@@ -342,12 +439,13 @@ export function ProductionRoom({
               <ul className="prod-list">
                 {list.map((p) => (
                   <ProductionRow
-                    key={p.id}
+                    key={`${p.id}:${p.sessionId}`}
                     mcp={mcp}
                     prod={p}
-                    onApproved={save}
+                    onSave={save}
                     onRemove={remove}
                     onReport={(prod, text) => setReport({ prod, text })}
+                    onView={onView}
                   />
                 ))}
               </ul>

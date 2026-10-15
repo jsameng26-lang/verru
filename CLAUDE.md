@@ -27,6 +27,9 @@ Claude 아티팩트로 게시하면 `sample`(AI 호출) · `db`(결과물 창고
 판매용 PDF는 **제작실**(`src/Production.tsx`, `src/ai/remote.ts`)이 만든다: 제작기 저장소(`company.config.ts`의 `PRODUCTION`)에
 Claude Code 세션을 열어 `/make-set` 1~4단계를 맡기고, 대표가 보고를 보고 '승인 → 판매 등록'을 누르면 확인 코드가 든
 승인 메시지를 보내 5단계(드라이브 업로드)를 진행시킨다. 세션을 자동으로 다시 열거나 승인을 자동으로 다시 보내지 않는다.
+세션은 0단계로 드라이브 판매 파일을 먼저 확인하고, 있으면 `[교체 확인]` 보고 → 제작실의 교체/중단 버튼(`대표 답 <코드>`)을 기다린다.
+사무실 직원들은 `Company.setProduction()`으로 세션 단계(check·making·question·report·uploading·done…)를 따라 출근해 일한다.
+진행률은 알 수 없으므로 지어내지 않는다(막대는 '하는 중' 표시).
 게시 파일: 페이지 + `assets/*`(해시 이름 그대로, 청크끼리 서로 import) + `fonts/*`(PDF 글꼴, 라이선스 포함).
 번들은 `esbuild.charset: "ascii"` 로 만든다 (docx 라이브러리의 U+FFFD 때문에 게시가 거부됨).
 팀별 프롬프트는 `src/ai/prompts.ts`, 작업 흐름은 `src/ai/job.ts` + `src/game/sim.ts` 의 dayScript.
