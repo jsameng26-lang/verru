@@ -71,13 +71,6 @@ export const TODAY_PICK = {
   reasons: ["① 시험 직후 수요 최고", "② 카페 자료 요청글 다수", "③ 5종 세트로 객단가 ↑"],
 };
 
-/** 결과물 창고에 보여줄 최근 산출물 */
-export const RECENT_OUTPUTS: { title: string; team: string; status: string }[] = [
-  { title: "견본 PDF 표지·워터마크 양식", team: "홈페이지 디자인팀", status: "최종 완료" },
-  { title: "카페·블로그 홍보글 템플릿", team: "마케팅팀", status: "최종 완료" },
-  { title: "상품 코드·파일명 규칙표", team: "자료관리팀", status: "최종 완료" },
-];
-
 /**
  * 부서 12개.
  * id = 고정(엔진용) / name·short·icon = 자유롭게 변경

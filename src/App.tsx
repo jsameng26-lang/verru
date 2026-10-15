@@ -6,7 +6,12 @@ import { Company, PHASES, type Agent, type DeptStatus, type Snapshot } from "./g
 import { BLOCK_NEED, CEO, DEPT_BRIEF, DEPT_LEAD, STAFF } from "./game/staff";
 import { DEPT_ROOMS } from "./game/world";
 import { LINK_ROWS } from "./links";
-import { COMPANY, RECENT_OUTPUTS, STORAGE_LINK, TODAY_PICK } from "../company.config";
+import { getDb, getDownloads, getPermissions, getSample, inClaude, type Downloads, type SampleFn } from "./ai/claude";
+import { fileNameFor, SECTION_ORDER, WorkJob, type RunData, type SectionId } from "./ai/job";
+import type { WorkInput } from "./ai/prompts";
+import { RunStore } from "./ai/store";
+import { OutputModal, OutputsPanel, RunModal, WorkOrder, type AiState } from "./Work";
+import { COMPANY, STORAGE_LINK, TODAY_PICK } from "../company.config";
 
 type View = "live" | "dashboard";
 
@@ -23,6 +28,37 @@ const SECRETARY = DEPT_LEAD.secretary;
 const BLOCK_NEEDS = Object.values(BLOCK_NEED);
 /** 대표 승인 회의에 올라오는 팀장들 (자료기획 · 분석지 · 비서실) */
 const APPROVERS = [DEPT_LEAD.strategy1, DEPT_LEAD.strategy2, DEPT_LEAD.secretary].map((s) => s.name).join("·");
+
+const EMPTY_ORDER: WorkInput = { exam: "", number: "", grade: "고2", passage: "", memo: "" };
+const DRAFT_KEY = "verru-work-order";
+
+/** 작성 중이던 작업 지시서 (이 브라우저에만 보관) */
+function loadDraft(): WorkInput {
+  try {
+    const raw = localStorage.getItem(DRAFT_KEY);
+    if (raw) return { ...EMPTY_ORDER, ...(JSON.parse(raw) as Partial<WorkInput>) };
+  } catch {
+    // 저장소를 못 쓰는 환경이면 빈 지시서로 시작
+  }
+  return EMPTY_ORDER;
+}
+
+/** 결재 카드에 올릴 안건 — 실제 작업이면 자료기획팀 계획, 연습 모드면 예시 안건 */
+function pickFor(run: RunData | null) {
+  if (!run) {
+    return { badge: `TOP 1 제안 · ${TODAY_PICK.score}점`, title: TODAY_PICK.title, summary: TODAY_PICK.summary, reasons: TODAY_PICK.reasons, real: false };
+  }
+  const plan = run.plan;
+  return {
+    badge: plan ? `제작 계획 · 난이도 ${plan.difficulty}` : "제작 계획",
+    title: run.productName,
+    summary: plan ? `${plan.summary} (주제: ${plan.topic})` : "계획 작성에 실패했어요. 지문으로 바로 5종 세트를 만들 수 있어요.",
+    reasons: plan ? plan.points.map((point, i) => `${"①②③"[i] ?? "·"} ${point}`) : [],
+    real: true,
+  };
+}
+
+const runPending = (run: RunData | null) => Boolean(run && SECTION_ORDER.some((id) => run.sections[id].status === "running"));
 
 function todayLabel() {
   const d = new Date();
@@ -61,9 +97,56 @@ export default function Home() {
   const [filter, setFilter] = useState<"전체" | DeptStatus>("전체");
   const [toast, setToast] = useState("");
   const [copied, setCopied] = useState(false);
-  /** 클립보드 복사가 막힌 환경(일부 앱 화면)에서 직접 복사하도록 보여줄 브리핑 */
+  /** 클립보드 복사가 막힌 환경(일부 앱 화면)에서 직접 복사하도록 보여줄 글 */
   const [manualCopy, setManualCopy] = useState<string | null>(null);
   const publishedRef = useRef(false);
+
+  // ── 실제 업무: AI 연결 · 저장소 · 파일 저장 ──
+  const [ai, setAi] = useState<AiState>("checking");
+  const [canSave, setCanSave] = useState(false);
+  const [runs, setRuns] = useState<RunData[]>([]);
+  const [order, setOrder] = useState<WorkInput>(loadDraft);
+  const [viewing, setViewing] = useState<{ runId: string; section: SectionId } | null>(null);
+  const [openRunId, setOpenRunId] = useState<string | null>(null);
+  const sampleRef = useRef<SampleFn | null>(null);
+  const downloadsRef = useRef<Downloads | null>(null);
+  const storeRef = useRef<RunStore | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    let unsubscribe = () => {};
+    void (async () => {
+      const [sample, db, downloads] = await Promise.all([getSample(), getDb(), getDownloads()]);
+      if (!alive) return;
+      sampleRef.current = sample;
+      downloadsRef.current = downloads;
+      setAi(sample ? "ready" : "off");
+      // Claude 밖(로컬 실행)에서는 브라우저 다운로드로 저장한다
+      setCanSave(Boolean(downloads) || !inClaude());
+      if (db) {
+        const store = new RunStore(db);
+        storeRef.current = store;
+        unsubscribe = store.subscribe(setRuns, () => {
+          storeRef.current = null;
+        });
+      }
+    })();
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      try {
+        localStorage.setItem(DRAFT_KEY, JSON.stringify(order));
+      } catch {
+        // 저장소를 못 쓰면 그냥 넘어간다
+      }
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [order]);
 
   useEffect(() => {
     let raf = 0;
@@ -95,6 +178,53 @@ export default function Home() {
   }, []);
 
   const onSelect = useCallback((agent: Agent) => setSelectedId(agent.id), []);
+
+  const copy = useCallback(
+    async (text: string, done: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(done);
+      } catch {
+        setManualCopy(text);
+      }
+    },
+    [showToast],
+  );
+
+  const saveDocx = useCallback(
+    async (run: RunData, ids: SectionId[], part: string) => {
+      const parts = ids.map((id) => ({ markdown: run.sections[id]?.text ?? "" })).filter((x) => x.markdown);
+      if (!parts.length) return;
+      const filename = fileNameFor(run.input, part);
+      try {
+        // 워드 파일 도구는 무거워서 저장할 때만 불러온다
+        const { buildDocx } = await import("./ai/docx");
+        const blob = await buildDocx(parts, `${COMPANY.reportName} · ${STORAGE_LINK.replace(/^https?:\/\//, "")}`);
+        const downloads = downloadsRef.current;
+        if (downloads) {
+          const result = await downloads.save({ filename, data: blob });
+          if (result.status === "saved") showToast(`${filename} 저장했어요`);
+        } else {
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement("a");
+          link.href = url;
+          link.download = filename;
+          link.click();
+          window.setTimeout(() => URL.revokeObjectURL(url), 2000);
+          showToast(`${filename} 저장했어요`);
+        }
+      } catch (error) {
+        const code = (error as { code?: string })?.code;
+        if (code === "declined") return;
+        showToast(code === "rate_limited" ? "저장 확인 창이 이미 열려 있어요" : "저장하지 못했어요. 다시 눌러주세요.");
+      }
+    },
+    [showToast],
+  );
+
+  /** 지금 돌고 있는 작업이면 화면 스냅샷, 아니면 결과물 창고에서 찾는다 */
+  const findRun = (id: string): RunData | null =>
+    snap.job?.id === id ? snap.job : (runs.find((r) => r.id === id) ?? null);
 
   /** 오늘 브리핑을 텍스트로 만들어 클립보드에 복사한다 (카톡·노션 어디든 붙여넣기) */
   const sendReport = useCallback(
@@ -138,10 +268,35 @@ export default function Home() {
   );
 
   const start = () => {
-    engine.start();
+    if (snap.running) return;
+    if (ai === "checking") {
+      showToast("AI 연결을 확인하는 중이에요. 잠깐 뒤에 다시 눌러주세요.");
+      return;
+    }
+    if (ai === "ready") {
+      const words = order.passage.trim().split(/\s+/).filter(Boolean).length;
+      if (words < 30) {
+        setView("live");
+        showToast("작업 지시서에 영어 지문을 붙여넣어 주세요 (30단어 이상)");
+        window.setTimeout(() => {
+          document.getElementById("work-order")?.scrollIntoView({ behavior: "smooth", block: "center" });
+          document.getElementById("order-passage")?.focus();
+        }, 60);
+        return;
+      }
+      // AI 사용 허락은 버튼을 누른 지금 묻는다 (일하던 도중에 갑자기 뜨지 않게)
+      void getPermissions()
+        .then((permissions) => permissions?.request(["sample"]))
+        .catch(() => undefined);
+      const job = new WorkJob({ ...order, passage: order.passage.trim() }, sampleRef.current, storeRef.current?.save ?? null);
+      engine.start(job);
+      showToast(`07:00 — AI 직원 ${HEADCOUNT}명이 출근해서 실제로 자료를 만듭니다 ✨`);
+    } else {
+      engine.start(null);
+      showToast("연습 모드로 출근합니다 — 이 화면에선 실제 자료는 만들어지지 않아요");
+    }
     setBriefing(false);
     setView("live");
-    showToast(`07:00 — AI 직원 ${HEADCOUNT}명이 출근합니다 ✨`);
   };
 
   const approve = () => {
@@ -215,6 +370,11 @@ export default function Home() {
             onDuty={onDuty}
             onPublish={() => void sendReport(false)}
             copied={copied}
+            ai={ai}
+            order={order}
+            setOrder={setOrder}
+            onOpenOutput={(section) => snap.job && setViewing({ runId: snap.job.id, section })}
+            onStopWork={() => engine.job?.cancel()}
           />
         ) : (
           <DashboardView
@@ -226,6 +386,9 @@ export default function Home() {
             onStart={start}
             onApprove={approve}
             onSelect={(id) => setSelectedId(id)}
+            runs={snap.job && !runs.some((r) => r.id === snap.job!.id) ? [snap.job, ...runs] : runs}
+            stored={Boolean(storeRef.current)}
+            onOpenRun={setOpenRunId}
           />
         )}
 
@@ -249,7 +412,45 @@ export default function Home() {
           }}
         />
       ) : null}
-      {briefing ? <BriefingModal snap={snap} onClose={() => setBriefing(false)} /> : null}
+      {briefing ? (
+        <BriefingModal
+          snap={snap}
+          onClose={() => setBriefing(false)}
+          onOpenBriefing={() => {
+            setBriefing(false);
+            if (snap.job) setViewing({ runId: snap.job.id, section: "briefing" });
+          }}
+        />
+      ) : null}
+      {openRunId && findRun(openRunId) ? (
+        <RunModal
+          run={findRun(openRunId)!}
+          canSave={canSave}
+          onOpen={(section) => setViewing({ runId: openRunId, section })}
+          onSave={(ids, part) => void saveDocx(findRun(openRunId)!, ids, part)}
+          onDelete={
+            storeRef.current && !runPending(findRun(openRunId))
+              ? () => {
+                  void storeRef.current?.remove(openRunId).catch(() => showToast("지우지 못했어요. 다시 눌러주세요."));
+                  setOpenRunId(null);
+                }
+              : null
+          }
+          onClose={() => setOpenRunId(null)}
+        />
+      ) : null}
+      {viewing && findRun(viewing.runId) ? (
+        <OutputModal
+          run={findRun(viewing.runId)!}
+          id={viewing.section}
+          canSave={canSave}
+          canRerun={engine.job?.id === viewing.runId && ai === "ready"}
+          onRerun={() => void engine.job?.rerun(viewing.section)}
+          onCopy={(text, done) => void copy(text, done)}
+          onSave={(ids, part) => void saveDocx(findRun(viewing.runId)!, ids, part)}
+          onClose={() => setViewing(null)}
+        />
+      ) : null}
       {manualCopy !== null ? <CopyModal text={manualCopy} onClose={() => setManualCopy(null)} /> : null}
       <div className={`toast ${toast ? "show" : ""}`} role="status">
         {toast}
@@ -270,6 +471,11 @@ function LiveView({
   onDuty,
   onPublish,
   copied,
+  ai,
+  order,
+  setOrder,
+  onOpenOutput,
+  onStopWork,
 }: {
   engine: Company;
   snap: Snapshot;
@@ -282,7 +488,13 @@ function LiveView({
   onDuty: number;
   onPublish: () => void;
   copied: boolean;
+  ai: AiState;
+  order: WorkInput;
+  setOrder: (next: WorkInput) => void;
+  onOpenOutput: (section: SectionId) => void;
+  onStopWork: () => void;
 }) {
+  const pick = pickFor(snap.job);
   const progress = Math.round((snap.phaseIndex / (PHASES.length - 1)) * 100);
 
   return (
@@ -360,10 +572,14 @@ function LiveView({
         </div>
       </section>
 
+      <WorkOrder input={order} setInput={setOrder} ai={ai} locked={snap.running} />
+
       <section className="live-grid">
         <OfficeWorld engine={engine} snap={snap} selectedId={selectedId} follow={follow} onSelect={onSelect} />
 
         <aside className="live-rail">
+          <OutputsPanel run={snap.job} ai={ai} pending={runPending(snap.job)} onOpen={onOpenOutput} onStop={onStopWork} />
+
           <CeoConsole engine={engine} snap={snap} />
 
           <section className="win rail-card" id="ceo-approval">
@@ -375,18 +591,23 @@ function LiveView({
               {snap.approvalPending ? (
                 <>
                   <div className="approval-top">
-                    <span className="mini-badge yellow">TOP 1 제안 · {TODAY_PICK.score}점</span>
+                    <span className="mini-badge yellow">{pick.badge}</span>
                     <span className="score blink">결재 대기</span>
                   </div>
-                  <h3>{TODAY_PICK.title}</h3>
-                  <p>회의실에서 {APPROVERS}가 대표님을 기다리고 있어요.</p>
+                  <h3>{pick.title}</h3>
+                  <p>{pick.real ? pick.summary : `회의실에서 ${APPROVERS}가 대표님을 기다리고 있어요.`}</p>
                   <div className="reason-list">
-                    {TODAY_PICK.reasons.map((reason) => (
+                    {pick.reasons.map((reason) => (
                       <span key={reason}>{reason}</span>
                     ))}
                   </div>
+                  {pick.real ? (
+                    <button className="text-button" onClick={() => onOpenOutput("plan")}>
+                      제작 계획 자세히 보기
+                    </button>
+                  ) : null}
                   <button className="btn approve-button" onClick={onApprove}>
-                    이 자료 세트 승인하기
+                    {pick.real ? "이 계획으로 제작 승인" : "이 자료 세트 승인하기"}
                   </button>
                 </>
               ) : (
@@ -394,11 +615,13 @@ function LiveView({
                   <div className="approval-top">
                     <span className="mini-badge mint">{snap.approved ? "오늘 결재 완료" : "결재 대기 없음"}</span>
                   </div>
-                  <h3>{snap.approved ? "승인하신 안으로 제작 중이에요" : "아직 올라온 안건이 없어요"}</h3>
+                  <h3>{snap.approved ? (snap.job ? `‘${snap.job.productName}’ 제작 중이에요` : "승인하신 안으로 제작 중이에요") : "아직 올라온 안건이 없어요"}</h3>
                   <p>
                     {snap.approved
                       ? "분석지·단어장 → 워크북·변형·서술형 → 검수 → 상세페이지·홍보 → 등록 준비까지 이어집니다."
-                      : "업무를 시작하면 자료기획팀이 TOP 3를 회의실로 올려요."}
+                      : ai === "ready"
+                        ? "지문을 넣고 업무를 시작하면 자료기획팀이 제작 계획을 회의실로 올려요."
+                        : "업무를 시작하면 자료기획팀이 TOP 3를 회의실로 올려요."}
                   </p>
                 </>
               )}
@@ -605,7 +828,18 @@ function ProfileModal({
   );
 }
 
-function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void }) {
+function BriefingModal({
+  snap,
+  onClose,
+  onOpenBriefing,
+}: {
+  snap: Snapshot;
+  onClose: () => void;
+  onOpenBriefing: () => void;
+}) {
+  const run = snap.job;
+  const made = run ? SECTION_ORDER.filter((id) => run.sections[id].status === "done").length : 0;
+  const failed = run ? SECTION_ORDER.filter((id) => run.sections[id].status === "failed").length : 0;
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <section
@@ -624,27 +858,51 @@ function BriefingModal({ snap, onClose }: { snap: Snapshot; onClose: () => void 
         <div className="win-body">
           <p className="brief-date">{snap.clock} · {SECRETARY.name} 비서실장 최종 브리핑</p>
           <h3>대표님, 오늘 회사 업무가 정리됐어요.</h3>
-          <ul>
-            <li>
-              <span className="dot green" />
-              완료 {snap.stats.done}팀 — 수요조사·기획·분석지·워크북·서술형·검수·상세페이지·홍보글까지 마쳤어요
-            </li>
-            <li>
-              <span className="dot green" />
-              대표 승인 1건 반영 — {TODAY_PICK.title} 제작 완료
-            </li>
-            <li>
-              <span className="dot gray" />
-              연동 대기 {snap.stats.blocked}팀 — 외부 서비스 연결이 필요해요
-            </li>
-          </ul>
+          {run ? (
+            <ul>
+              <li>
+                <span className="dot green" />
+                ‘{run.productName}’ — 결과물 {made}건 완성
+              </li>
+              <li>
+                <span className={`dot ${failed ? "yellow" : "green"}`} />
+                {failed ? `${failed}건은 실패했어요 — 결과물에서 ‘다시 만들기’를 눌러주세요` : "실패한 작업 없음"}
+              </li>
+              <li>
+                <span className="dot gray" />
+                연동 대기 {snap.stats.blocked}팀 — {BLOCK_NEEDS.join(" · ") || "없음"}
+              </li>
+            </ul>
+          ) : (
+            <ul>
+              <li>
+                <span className="dot green" />
+                완료 {snap.stats.done}팀 — 연습 모드라 실제 결과물은 없어요
+              </li>
+              <li>
+                <span className="dot gray" />
+                연동 대기 {snap.stats.blocked}팀 — 외부 서비스 연결이 필요해요
+              </li>
+            </ul>
+          )}
           <div className="decision-box">
-            <span className="tiny-label">오늘 대표님이 결정할 것</span>
-            <strong>사이트 업로드와 카페·블로그 게시만 직접 해주세요. 내일 07:00에 다시 출근할게요 ✨</strong>
+            <span className="tiny-label">대표님이 하실 일</span>
+            <strong>
+              {run
+                ? "검수 보고서 확인 → 사이트에 파일 업로드 → 카페·블로그에 홍보글 게시"
+                : "없습니다. 내일 07:00에 다시 출근할게요 ✨"}
+            </strong>
           </div>
-          <button className="btn btn-primary" onClick={onClose}>
-            확인
-          </button>
+          <div className="profile-actions">
+            {run ? (
+              <button className="btn btn-primary" onClick={onOpenBriefing}>
+                브리핑 문서 보기
+              </button>
+            ) : null}
+            <button className={run ? "text-button" : "btn btn-primary"} onClick={onClose}>
+              확인
+            </button>
+          </div>
         </div>
       </section>
     </div>
@@ -662,7 +920,7 @@ function CopyModal({ text, onClose }: { text: string; onClose: () => void }) {
         aria-label="브리핑 직접 복사"
       >
         <div className="win-bar">
-          <span>📤 briefing.txt</span>
+          <span>📤 copy.txt</span>
           <button className="window-close" onClick={onClose}>
             ✕
           </button>
@@ -707,6 +965,9 @@ function DashboardView({
   onStart,
   onApprove,
   onSelect,
+  runs,
+  stored,
+  onOpenRun,
 }: {
   teams: TeamRow[];
   filteredTeams: TeamRow[];
@@ -716,8 +977,12 @@ function DashboardView({
   onStart: () => void;
   onApprove: () => void;
   onSelect: (id: string) => void;
+  runs: RunData[];
+  stored: boolean;
+  onOpenRun: (id: string) => void;
 }) {
   const rows = LINK_ROWS;
+  const pick = pickFor(snap.job);
 
   return (
     <>
@@ -872,17 +1137,16 @@ function DashboardView({
               </div>
               <div className="win-body approval-body">
                 <div className="approval-top">
-                  <span className="mini-badge yellow">TOP 1 제안</span>
-                  <span className="score">{TODAY_PICK.score}점</span>
+                  <span className="mini-badge yellow">{pick.badge}</span>
                 </div>
-                <h3>{TODAY_PICK.title}</h3>
-                <p>{TODAY_PICK.summary}</p>
+                <h3>{pick.title}</h3>
+                <p>{pick.summary}</p>
                 <button
                   className={`btn approve-button ${snap.approved ? "approved" : ""}`}
                   onClick={onApprove}
                   disabled={!snap.approvalPending}
                 >
-                  {snap.approved ? "승인 완료 · 분석지팀 전달됨" : snap.approvalPending ? "이 자료 세트 승인하기" : "대기 중인 안건 없음"}
+                  {snap.approved ? "승인 완료 · 분석지팀 전달됨" : snap.approvalPending ? (pick.real ? "이 계획으로 제작 승인" : "이 자료 세트 승인하기") : "대기 중인 안건 없음"}
                 </button>
               </div>
             </section>
@@ -913,7 +1177,7 @@ function DashboardView({
                   <span className="tiny-label">대표님이 오늘 결정할 1개</span>
                   <strong>
                     {snap.approvalPending
-                      ? "TOP 1 자료 세트를 제작할지 승인해주세요."
+                      ? "제작 계획을 보고 승인해주세요."
                       : snap.approved
                         ? "결정 완료! 제작팀이 다음 업무를 진행해요."
                         : "아직 올라온 안건이 없어요."}
@@ -944,20 +1208,40 @@ function DashboardView({
           </div>
           <div className="result-table">
             <div className="result-row header">
-              <span>결과물</span>
-              <span>담당팀</span>
+              <span>결과물 세트</span>
+              <span>만든 날</span>
               <span>상태</span>
               <span>바로가기</span>
             </div>
-            {RECENT_OUTPUTS.map((item) => (
-              <div className="result-row" key={item.title}>
-                <b>{item.title}</b>
-                <span>{item.team}</span>
-                <span className="status-pill done">{item.status}</span>
-                <span>—</span>
-              </div>
-            ))}
+            {runs.length ? (
+              runs.map((run) => {
+                const done = SECTION_ORDER.filter((id) => run.sections[id]?.status === "done").length;
+                const failed = SECTION_ORDER.filter((id) => run.sections[id]?.status === "failed").length;
+                const working = runPending(run);
+                return (
+                  <div className="result-row" key={run.id}>
+                    <b>{run.productName}</b>
+                    <span>{new Date(run.createdAt).toLocaleDateString("ko-KR")}</span>
+                    <span className={`status-pill ${working ? "working" : failed ? "blocked" : "done"}`}>
+                      {working ? "만드는 중" : failed ? `${done}건 완료 · ${failed}건 실패` : `${done}건 완료`}
+                    </span>
+                    <span>
+                      <button className="mini-open" onClick={() => onOpenRun(run.id)}>
+                        열기
+                      </button>
+                    </span>
+                  </div>
+                );
+              })
+            ) : (
+              <p className="outputs-empty">
+                아직 만든 자료가 없어요. 라이브 오피스의 작업 지시서에 지문을 넣고 업무를 시작하면 여기에 쌓여요.
+              </p>
+            )}
           </div>
+          {!stored && runs.length ? (
+            <p className="dash-note">이 화면에선 저장소를 쓸 수 없어서, 페이지를 닫으면 결과물이 사라져요. 필요한 건 .docx로 저장해두세요.</p>
+          ) : null}
         </div>
       </section>
 

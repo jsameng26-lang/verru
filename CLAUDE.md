@@ -18,6 +18,13 @@ Vite + React + TypeScript, 서버 없음.
 3. 직원 이름은 색깔 이름, 옷색(`colors[1]`)은 그 이름의 파스텔 색.
 4. 직원 이름은 코드 어디에도 하드코딩하지 마세요 — `DEPT_LEAD[deptId].name` 으로 가져옵니다.
 
+## 실제 작업 모드
+
+Claude 아티팩트로 게시하면 `sample`(AI 호출) · `db`(결과물 창고, `runs` 컬렉션) · `downloads`(.docx 저장)를 쓴다.
+게시할 때 capabilities: `{ sample: {}, db: { rules: [{ path: "runs", read: "admin", write: "admin" }] }, downloads: true }`.
+팀별 프롬프트는 `src/ai/prompts.ts`, 작업 흐름은 `src/ai/job.ts` + `src/game/sim.ts` 의 dayScript.
+AI가 없는 환경에서는 연습 모드(연출만)로 떨어지며, 이걸 실제 작업처럼 보이게 하지 말 것.
+
 ## 비밀값
 
 저장소가 공개입니다. 관리자페이지 주소(key 포함)·스프레드시트 주소는 절대 커밋하지 말고

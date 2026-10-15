@@ -546,3 +546,87 @@
 
 /* 브리핑 직접 복사 창 */
 .copy-box { display: block; width: 100%; min-height: 240px; margin: 10px 0 14px; padding: 10px; border: 2px solid var(--ink); border-radius: 10px; background: var(--pink-bg); color: var(--ink); font-size: 12px; line-height: 1.55; resize: vertical; }
+
+/* ── 실제 업무: 작업 지시서 ─────────────────────────────── */
+.work-order { margin-bottom: 14px; }
+.ai-note { margin-bottom: 14px; padding: 10px 12px; border: 1.5px dashed var(--pink-line); border-radius: 10px; background: #fff8fc; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.ai-note b { margin-right: 6px; padding: 2px 8px; border: 1.5px solid var(--ink); border-radius: 999px; color: var(--ink); font-size: 10px; }
+.ai-note.ready b { background: var(--mint); }
+.ai-note.off b, .ai-note.checking b { background: var(--yellow); }
+.order-grid { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+.work-order label { display: grid; gap: 5px; min-width: 0; }
+.work-order label > span { color: var(--ink-soft); font-size: 11px; font-weight: 900; }
+.work-order label > span small { margin-left: 6px; color: var(--ink-faint); font-weight: 700; }
+.work-order input, .work-order select, .work-order textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 2px solid var(--ink);
+  border-radius: 10px;
+  background: var(--win);
+  color: var(--ink);
+  font-size: 13px;
+}
+.work-order textarea { min-height: 120px; line-height: 1.6; resize: vertical; }
+.work-order :is(input, select, textarea):focus-visible { outline: 3px solid rgba(255, 95, 168, .35); outline-offset: 2px; }
+.work-order :is(input, select, textarea):disabled { background: #fff5fa; color: var(--ink-soft); }
+.order-memo { margin-top: 10px; }
+.order-memo summary { color: var(--ink-soft); font-size: 12px; font-weight: 700; cursor: pointer; }
+.order-memo textarea { margin-top: 8px; min-height: 70px; }
+.order-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 8px; }
+.order-hint { margin-left: auto; color: var(--ink-faint); font-size: 11px; }
+
+/* ── 오늘 결과물 ─────────────────────────────────────────── */
+.outputs-body { display: grid; gap: 10px; }
+.outputs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.outputs-head b { min-width: 0; font-size: 13px; line-height: 1.4; }
+.outputs-head .text-button { min-height: 28px; flex: none; }
+.outputs-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.outputs-list li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 6px 8px; border: 1.5px solid var(--pink-line); border-radius: 10px; background: #fffafd; }
+.outputs-list i { font-style: normal; text-align: center; }
+.outputs-list span { display: grid; min-width: 0; }
+.outputs-list span b { font-size: 12px; }
+.outputs-list span small { overflow: hidden; color: var(--ink-faint); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.outputs-list em { font-style: normal; }
+.outputs-empty { margin: 0; padding: 14px 12px; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.mini-open { min-height: 30px; padding: 4px 10px; border: 1.5px solid var(--ink); border-radius: 8px; background: var(--yellow); color: var(--ink); font-size: 11px; font-weight: 900; cursor: pointer; }
+.mini-open:disabled { background: #f6eef2; color: var(--ink-faint); border-color: var(--ink-faint); cursor: default; }
+.text-button.danger { color: #c2185b; }
+.status-pill.blocked { background: #e7ddff; }
+
+/* ── 문서 보기 창 ────────────────────────────────────────── */
+.doc-modal { width: min(820px, 100%); }
+.doc-modal .win-body { display: grid; gap: 10px; }
+.doc-modal h3 { margin: 0; }
+.doc-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.doc-top small { color: var(--ink-soft); font-size: 11px; }
+.doc-error { margin: 0; padding: 8px 10px; border: 1.5px solid var(--lav); border-radius: 8px; background: #f4efff; font-size: 12px; }
+.doc-scroll { max-height: min(62vh, 640px); overflow: auto; padding: 14px 16px; border: 1.5px solid var(--pink-line); border-radius: 10px; background: var(--win); }
+.doc-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.doc-actions .btn { min-height: 40px; padding-inline: 14px; }
+.doc-modal .doc-actions .btn-primary { width: auto; }
+
+/* 마크다운 본문 */
+.md-view { color: var(--ink); font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; }
+.md-view h2 { margin: 0 0 10px; font-size: 19px; text-wrap: balance; }
+.md-view h3 { margin: 18px 0 8px; color: var(--pink-deep); font-size: 15px; }
+.md-view h4 { margin: 14px 0 6px; font-size: 13px; }
+.md-view p { margin: 0 0 8px; }
+.md-view ul, .md-view ol { margin: 0 0 10px; padding-left: 20px; }
+.md-view blockquote { margin: 0 0 10px; padding: 6px 12px; border-left: 3px solid var(--pink); background: #fff5fa; }
+.md-view hr { margin: 14px 0; border: 0; border-top: 1.5px dashed var(--pink-line); }
+.md-table { margin: 0 0 12px; overflow-x: auto; }
+.md-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.md-table th, .md-table td { padding: 6px 8px; border: 1px solid var(--pink-line); text-align: left; vertical-align: top; }
+.md-table th { background: var(--pink-bg); font-weight: 900; }
+
+@media (max-width: 680px) {
+  .order-grid { grid-template-columns: 1fr 1fr; }
+  .order-grid label:first-child { grid-column: 1 / -1; }
+  .order-hint { margin-left: 0; }
+  .doc-scroll { padding: 10px; }
+}
+
+.work-order.compact .win-body { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 10px 16px; font-size: 13px; }
+.work-order.compact span { min-width: 0; overflow-wrap: anywhere; }
+.work-order.compact small { margin-left: auto; color: var(--ink-faint); font-size: 11px; }

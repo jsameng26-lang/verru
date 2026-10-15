@@ -4,6 +4,7 @@
 import { findPath } from "./pathfinding";
 import { BLOCK_REASON, CEO, DEPT_BRIEF, DEPT_KEYWORDS, DEPT_LEAD, STAFF, type StaffSeed } from "./staff";
 import { TODAY_PICK } from "../../company.config";
+import { SECTION_META, SECTION_ORDER, type RunData, type SectionId, type WorkJob } from "../ai/job";
 import {
   CEO_REPORT_SPOT,
   CEO_SEAT,
@@ -48,7 +49,8 @@ type Action =
   | { k: "face"; dir: Facing }
   | { k: "anim"; a: Anim }
   | { k: "status"; s: AgentStatus }
-  | { k: "work"; dur: number; label: string }
+  /** until 이 있으면 실제 AI 작업이 끝날 때까지(최소 dur초) 일한다 */
+  | { k: "work"; dur: number; label: string; until?: () => boolean; progress?: () => number }
   | { k: "fn"; fn: () => void };
 
 export type Agent = {
@@ -124,21 +126,23 @@ export type Snapshot = {
   focusMode: boolean;
   spotlight: string | null;
   busyWithOrder: boolean;
+  /** 실제 작업 중인 지문 세트 (연습 모드면 null) */
+  job: RunData | null;
 };
 
 const PHASES = [
   "출근 대기",
   "07:00 전사 출근",
-  "수요조사",
+  "수요 메모 분석",
   "고객 문의 확인",
-  "제작 후보 10개",
-  "TOP 3 선정",
+  "지문 진단·제작 계획",
+  "계획 보고",
   "대표 승인 대기",
   "분석지·단어장 제작",
   "워크북·변형·서술형 제작",
   "정답·해설 검수",
   "상세페이지·홍보글",
-  "등록 준비·정산",
+  "상품 등록 정보",
   "비서실 브리핑",
   "업무 종료",
 ];
@@ -177,6 +181,8 @@ export class Company {
   chat: ChatEntry[] = [];
   focusMode = false;
   spotlight: string | null = null;
+  /** 실제 AI 작업 — 없으면 연습 모드(연출만) */
+  job: WorkJob | null = null;
 
   private spotlightUntil = 0;
   private elapsed = 0;
@@ -218,6 +224,7 @@ export class Company {
     this.spotlightUntil = 0;
     this.elapsed = 0;
     this.approvalSince = null;
+    this.job = null;
 
     const seats = new Map<string, Pt[]>();
     for (const room of DEPT_ROOMS) seats.set(room.id, room.desks.map((d) => d.seat));
@@ -334,9 +341,11 @@ export class Company {
   }
 
   // ── 하루 시나리오 ─────────────────────────────────────────
-  start() {
+  /** job 을 주면 실제로 자료를 만들고, 없으면 연출만 하는 연습 모드 */
+  start(job: WorkJob | null = null) {
     if (this.running) return;
     this.reset();
+    this.job = job;
     this.running = true;
     this.main.gen = this.dayScript();
   }
@@ -370,9 +379,20 @@ export class Company {
     yield 1.6;
     this.sitAtDesk(sec);
 
-    // ② 수요조사 — 시험 일정·범위·카페 자료 요청
+    const job = this.job;
+
+    // ② 수요조사 — 실제 모드에서는 대표가 붙여넣은 메모만 정리한다 (인터넷 검색은 못 함)
     this.phaseIndex = 2;
-    yield* this.runDept("research", "학평·내신 일정, 카페 자료 요청 조사", 6.5, "이번 주 수요 높은 시험 5개 뽑았어요.");
+    if (!job) {
+      yield* this.runDept("research", "학평·내신 일정, 카페 자료 요청 조사", 6.5, "이번 주 수요 높은 시험 5개 뽑았어요.");
+    } else if (job.hasMemo) {
+      yield* this.runJob("research", "대표 메모에서 수요 정리", ["demand"], () => "메모 속 요청 정리했어요.");
+    } else {
+      job.skip("demand", "붙여넣은 수요 메모가 없어요");
+      this.say(this.lead("research"), "오늘은 정리할 메모가 없어요.", 3);
+      this.pushLog("🔎", "수요조사팀: 붙여넣은 수요 메모가 없어 건너뜁니다. (인터넷 검색은 못 해요)", "lav");
+      yield 1.5;
+    }
 
     // ③ 고객 문의 확인 — 연동 대기면 기록만 남기고 쉰다
     this.phaseIndex = 3;
@@ -380,26 +400,43 @@ export class Company {
 
     // ④ 회의 1 — 수요조사 → 자료기획 → 자료관리 인수인계
     yield* this.meeting(
-      "이번 주 제작 후보 인수인계",
+      job ? "오늘 지문 인수인계" : "이번 주 제작 후보 인수인계",
       ["research-lead", "strategy1-lead", "ops-lead"],
-      [
-        ["research-lead", "수요 높은 시험 5개예요. 카페 요청글도 같이 넘겨요."],
-        ["strategy1-lead", "좋아요. 제작 후보 10개로 풀게요."],
-        ["ops-lead", "이미 판매 중인 자료랑 겹치는지 목록에서 볼게요."],
-      ],
+      job
+        ? [
+            ["research-lead", job.hasMemo ? "수요 메모 정리한 거 같이 넘길게요." : "오늘은 메모가 없어서 지문만 넘겨요."],
+            ["strategy1-lead", "지문 진단하고 5종 세트 계획 세울게요."],
+            ["ops-lead", "등록용 상품 코드랑 파일 이름 미리 잡아둘게요."],
+          ]
+        : [
+            ["research-lead", "수요 높은 시험 5개예요. 카페 요청글도 같이 넘겨요."],
+            ["strategy1-lead", "좋아요. 제작 후보 10개로 풀게요."],
+            ["ops-lead", "이미 판매 중인 자료랑 겹치는지 목록에서 볼게요."],
+          ],
     );
 
-    // ⑤ 제작 후보 10개
+    // ⑤ 지문 진단·제작 계획
     this.phaseIndex = 4;
-    yield* this.runDept("strategy1", "제작 후보 10개 · 100점 채점", 7, "후보 10개, 평균 78점이에요.");
-    this.pushLog("💡", "자료기획팀 탈락 3건: 판매 중 세트와 중복 / 시험까지 일정 부족 / 수요 근거 부족", "lav");
+    if (job) {
+      yield* this.runJob("strategy1", "지문 진단 · 5종 세트 제작 계획", ["plan"], () =>
+        job.plan ? `계획 나왔어요. 난이도 ${job.plan.difficulty}!` : "계획은 실패했지만 지문으로 바로 만들 수 있어요.",
+      );
+    } else {
+      yield* this.runDept("strategy1", "제작 후보 10개 · 100점 채점", 7, "후보 10개, 평균 78점이에요.");
+      this.pushLog("💡", "자료기획팀 탈락 3건: 판매 중 세트와 중복 / 시험까지 일정 부족 / 수요 근거 부족", "lav");
+    }
 
-    // ⑥ TOP 3 선정
+    // ⑥ 계획 보고
     this.phaseIndex = 5;
     const planner = this.lead("strategy1");
     this.stand(planner);
-    this.say(planner, `TOP 3 정리했어요. 1위는 ${TODAY_PICK.score}점!`, 3);
-    this.pushLog("💡", `자료기획팀: TOP 3 확정 (1위 ${TODAY_PICK.score}점 · ${TODAY_PICK.title})`, "pink");
+    if (job) {
+      this.say(planner, `'${job.productName()}' 계획 올립니다.`, 3);
+      this.pushLog("💡", `자료기획팀: 제작 계획 확정 — ${job.productName()}`, "pink");
+    } else {
+      this.say(planner, `TOP 3 정리했어요. 1위는 ${TODAY_PICK.score}점!`, 3);
+      this.pushLog("💡", `자료기획팀: TOP 3 확정 (1위 ${TODAY_PICK.score}점 · ${TODAY_PICK.title})`, "pink");
+    }
     yield 1.8;
     this.sitAtDesk(planner);
 
@@ -408,7 +445,7 @@ export class Company {
     this.deptStatus.strategy2 = "승인 대기";
     this.approvalPending = true;
     this.turbo = false; // 대표 결정 지점에서는 즉시 정상 속도로 돌아온다
-    this.meetingTitle = "TOP 3 대표 승인";
+    this.meetingTitle = job ? "제작 계획 대표 승인" : "TOP 3 대표 승인";
     this.pushLog("📋", "대표 승인 대기: 오늘 결정할 안건 1개가 회의실에 올라왔어요.", "yellow");
 
     const approvers = this.approvers();
@@ -431,7 +468,11 @@ export class Company {
     );
     yield this.allFree([...approvers, ceo]);
 
-    this.say(approvers[0], `TOP 1은 '${TODAY_PICK.title}' ${TODAY_PICK.score}점이에요.`, 3.4);
+    this.say(
+      approvers[0],
+      job ? `'${job.productName()}' 5종 세트 계획이에요.` : `TOP 1은 '${TODAY_PICK.title}' ${TODAY_PICK.score}점이에요.`,
+      3.4,
+    );
     yield 2.4;
     this.say(approvers[1], "승인 나면 분석지부터 바로 들어갈게요.", 3);
     yield 2.2;
@@ -445,7 +486,7 @@ export class Company {
     this.approvalPending = false;
     this.meetingTitle = null;
     this.say(ceo, "승인! 이대로 갑시다.", 2.8);
-    this.pushLog("✅", "대표 승인 완료 — TOP 1 자료 세트 제작을 시작합니다.", "mint");
+    this.pushLog("✅", job ? "대표 승인 완료 — 5종 세트 제작을 시작합니다." : "대표 승인 완료 — TOP 1 자료 세트 제작을 시작합니다.", "mint");
     yield 1.6;
     for (const agent of approvers) {
       this.releaseSeat(agent);
@@ -459,40 +500,67 @@ export class Company {
 
     // ⑧ 분석지·단어장
     this.phaseIndex = 7;
-    yield* this.runDept("strategy2", "구문·해석 분석지 + 단어장 제작", 7, "분석지·단어장 완성! 핵심 구문 표시해뒀어요.");
+    if (job) {
+      yield* this.runJob("strategy2", "문장별 분석지 + 단어장 작성", ["analysis", "vocab"], () =>
+        this.teamFailed("strategy2") ? "일부 실패했어요. 다시 만들기 눌러주세요." : "분석지·단어장 완성했어요!",
+      );
+    } else {
+      yield* this.runDept("strategy2", "구문·해석 분석지 + 단어장 제작", 7, "분석지·단어장 완성! 핵심 구문 표시해뒀어요.");
+    }
 
     // ⑨ 인수인계 → 워크북·변형문제 + 서술형 동시 작업
     this.phaseIndex = 8;
     yield* this.deliver("strategy2-lead", "reels", "분석지 넘길게요. 이걸로 워크북·변형문제 뽑아주세요.", "받았어요! 유형별로 고르게 낼게요.");
     yield* this.deliver("strategy2-lead", "carousel", "서술형 포인트 구문 표시해뒀어요.", "조건 영작부터 만들게요.");
 
-    this.startDept("reels", "빈칸 워크북 · 순서·삽입·어법 변형문제", 8);
-    this.startDept("carousel", "조건 영작·요약문 + 모범답안·채점기준", 8);
+    if (job) {
+      this.startJobDept("reels", "워크북 + 변형문제 5문항 출제", ["workbook", "variants"]);
+      this.startJobDept("carousel", "서술형 4문항 + 모범답안·채점기준", ["writing"]);
+    } else {
+      this.startDept("reels", "빈칸 워크북 · 순서·삽입·어법 변형문제", 8);
+      this.startDept("carousel", "조건 영작·요약문 + 모범답안·채점기준", 8);
+    }
     yield () => this.deptStatus.reels === "완료" && this.deptStatus.carousel === "완료";
-    this.pushLog("📝", "워크북·변형문제 · 서술형 대비 문제 제작 완료 (원문 지문은 그대로 보존)", "mint");
+    this.pushLog("📝", "워크북·변형문제 · 서술형 대비 문제 제작 끝 (원문 지문은 그대로 보존)", "mint");
 
     // ⑩ 검수
     this.phaseIndex = 9;
-    yield* this.runDept("qa", "정답·해설 대조 · 오탈자·서식 검수", 5.5, "오류 3건 고쳤고, 전 문항 정답 확인했어요.");
-    this.pushLog("🛡️", "검수 수정 3건: 변형문제 정답 번호 / 단어장 뜻 누락 / 분석지 오탈자", "lav");
+    if (job) {
+      yield* this.runJob("qa", "모든 문항 직접 풀어 정답 검증", ["qa"], () =>
+        this.teamFailed("qa") ? "검수가 중간에 끊겼어요." : "검수 끝! 보고서 확인해주세요.",
+      );
+    } else {
+      yield* this.runDept("qa", "정답·해설 대조 · 오탈자·서식 검수", 5.5, "오류 3건 고쳤고, 전 문항 정답 확인했어요.");
+      this.pushLog("🛡️", "검수 수정 3건: 변형문제 정답 번호 / 단어장 뜻 누락 / 분석지 오탈자", "lav");
+    }
 
     // ⑪ 상세페이지 + 홍보글 동시 작업
     this.phaseIndex = 10;
-    this.startDept("review", "상세페이지·썸네일·워터마크 견본 PDF", 6);
-    this.startDept("partner", "황영카·기출비 카페글 + 블로그 포스팅 초안", 6);
+    if (job) {
+      this.startJobDept("review", "상세페이지 문구 · 썸네일 문구", ["detail"]);
+      this.startJobDept("partner", "황영카·기출비 카페글 + 블로그 포스팅", ["promo"]);
+    } else {
+      this.startDept("review", "상세페이지·썸네일·워터마크 견본 PDF", 6);
+      this.startDept("partner", "황영카·기출비 카페글 + 블로그 포스팅 초안", 6);
+    }
     yield () => this.deptStatus.review === "완료" && this.deptStatus.partner === "완료";
-    this.pushLog("📣", "상세페이지·견본 PDF · 카페/블로그 홍보글 초안 완성 — 실제 게시는 대표님이 직접", "mint");
+    this.pushLog("📣", "상세페이지 문구 · 카페/블로그 홍보글 완성 — 실제 게시는 대표님이 직접", "mint");
 
-    // ⑫ 등록 준비 + 정산 (회계는 연동 대기면 건너뜀)
+    // ⑫ 상품 등록 정보 + 정산 (회계는 연동 대기면 건너뜀)
     this.phaseIndex = 11;
-    this.startDept("ops", "시트·관리자페이지 등록 정보 + 최종 파일 정리", 5);
+    if (job) {
+      this.startJobDept("ops", "상품 코드·파일 이름·시트용 한 줄 정리", ["listing"], 4);
+    } else {
+      this.startDept("ops", "시트·관리자페이지 등록 정보 + 최종 파일 정리", 5);
+    }
     const settle = !BLOCKED_DEPTS.has("finance");
     if (settle) this.startDept("finance", "신규 자료 가격·매출 반영", 5);
     yield () => this.deptStatus.ops === "완료" && (!settle || this.deptStatus.finance === "완료");
-    this.pushLog("🗂️", "판매 등록 준비 완료 — 사이트 업로드는 대표 확인 후 진행", "mint");
+    this.pushLog("🗂️", "등록 정보 준비 완료 — 사이트 업로드는 대표님이 직접 해요", "mint");
 
     // ⑬ 비서실 브리핑
     this.phaseIndex = BRIEFING_PHASE;
+    if (job) void job.run("briefing");
     this.lock([sec]);
     this.stand(sec);
     this.say(sec, "전사 보고 취합했어요. 대표님께 갑니다.", 3);
@@ -544,6 +612,34 @@ export class Company {
     yield 1.2;
   }
 
+  /** 실제 AI 작업을 맡겨 끝날 때까지 기다린다 */
+  private *runJob(deptId: string, label: string, ids: SectionId[], report: () => string, minDur = 3) {
+    this.startJobDept(deptId, label, ids, minDur);
+    yield () => this.deptStatus[deptId] === "완료";
+    this.say(this.lead(deptId), report(), 3.2);
+    yield 1.2;
+  }
+
+  private startJobDept(deptId: string, label: string, ids: SectionId[], minDur = 3) {
+    const job = this.job!;
+    for (const id of ids) void job.run(id);
+    this.startDept(
+      deptId,
+      label,
+      minDur,
+      () => ids.every((id) => job.isSettled(id)),
+      () => ids.reduce((sum, id) => sum + job.progress(id), 0) / ids.length,
+    );
+  }
+
+  private teamSections(deptId: string) {
+    return SECTION_ORDER.filter((id) => SECTION_META[id].dept === deptId);
+  }
+
+  private teamFailed(deptId: string) {
+    return this.teamSections(deptId).some((id) => this.job?.section(id).status === "failed");
+  }
+
   private lead(deptId: string): Agent {
     return this.agentById.get(DEPT_LEAD[deptId].id)!;
   }
@@ -558,7 +654,7 @@ export class Company {
   }
 
   /** 부서 업무 시작(비동기) */
-  private startDept(deptId: string, label: string, dur: number) {
+  private startDept(deptId: string, label: string, dur: number, until?: () => boolean, progress?: () => number) {
     this.deptStatus[deptId] = "진행 중";
     const crew = this.deptAgents(deptId);
     this.lock(crew);
@@ -570,7 +666,7 @@ export class Company {
         { k: "walk", to: agent.home },
         { k: "face", dir: "up" },
         { k: "status", s: "업무 중" },
-        { k: "work", dur: dur + Math.random() * 1.5, label },
+        { k: "work", dur: dur + Math.random() * 1.5, label, until, progress },
         { k: "anim", a: "sit" },
         { k: "status", s: "대기" },
         { k: "fn", fn: () => this.finishDept(deptId) },
@@ -585,8 +681,24 @@ export class Company {
     this.unlock(this.deptAgents(deptId));
     const lead = DEPT_LEAD[deptId];
     const agent = lead ? this.agentById.get(lead.id) : null;
+    const failed = this.job ? this.teamSections(deptId).filter((id) => this.job!.section(id).status === "failed") : [];
+    if (failed.length) {
+      if (agent) this.say(agent, "일부가 실패했어요…", 2.4);
+      const names = failed.map((id) => SECTION_META[id].title).join("·");
+      this.pushLog("⚠️", `${roomOf(deptId).name}: ${names} 실패 — ${this.job!.section(failed[0]).error}`, "lav");
+      return;
+    }
     if (agent) this.say(agent, "완료했어요!", 2.4);
-    this.pushLog(roomOf(deptId).icon, `${roomOf(deptId).name} 완료 — ${DEPT_BRIEF[deptId].report}`, "mint");
+    const made = this.job
+      ? this.teamSections(deptId)
+          .filter((id) => this.job!.section(id).status === "done")
+          .map((id) => `${SECTION_META[id].title} ${this.job!.section(id).text.length.toLocaleString()}자`)
+      : [];
+    this.pushLog(
+      roomOf(deptId).icon,
+      made.length ? `${roomOf(deptId).name} 완료 — ${made.join(" · ")} 작성` : `${roomOf(deptId).name} 완료 — ${DEPT_BRIEF[deptId].report}`,
+      "mint",
+    );
   }
 
   private *runDept(deptId: string, label: string, dur: number, report: string) {
@@ -809,7 +921,18 @@ export class Company {
     const crew = this.deptAgents(deptId);
     const lines: string[] = [];
 
-    if (status === "진행 중") {
+    const writing = this.job
+      ? this.teamSections(deptId)
+          .map((id) => this.job!.section(id))
+          .filter((sec) => sec.status === "running")
+      : [];
+    if (status === "진행 중" && writing.length) {
+      lines.push(
+        `지금 실제로 쓰는 중이에요: ${writing
+          .map((sec) => `${SECTION_META[sec.id].title} ${sec.text ? `${sec.text.length.toLocaleString()}자` : "(구상 중)"}`)
+          .join(" · ")}`,
+      );
+    } else if (status === "진행 중") {
       lines.push(`${this.deptTaskLabel(deptId)} 작업 중이에요. 진행률 ${this.deptProgress(deptId)}%.`);
     } else if (status === "완료") {
       lines.push(`오늘 몫은 끝냈어요. ${DEPT_BRIEF[deptId].report}`);
@@ -865,7 +988,7 @@ export class Company {
   private boost() {
     let count = 0;
     for (const agent of this.agents) {
-      if (agent.current?.k === "work") {
+      if (agent.current?.k === "work" && !agent.current.until) {
         agent.current.dur = Math.max(agent.timer + 0.8, agent.current.dur * 0.55);
         this.say(agent, "네! 속도 올릴게요", 2.4);
         count += 1;
@@ -1035,7 +1158,9 @@ export class Company {
 
     const raw = Math.min(rawDt, 0.05);
     const dt = raw * (this.turbo ? TURBO_SPEED : this.speed);
-    if (this.running) this.clockMinutes += dt * SIM_MIN_PER_SEC;
+    // 실제 AI 작업을 기다리는 동안은 시계를 천천히 — 몇 분 걸려도 하루가 밤까지 넘어가지 않게
+    const rate = this.job && this.job.pending() > 0 ? SIM_MIN_PER_SEC * 0.2 : SIM_MIN_PER_SEC;
+    if (this.running) this.clockMinutes += dt * rate;
 
     this.occupancy.clear();
     for (const agent of this.agents) {
@@ -1110,8 +1235,16 @@ export class Company {
       }
       case "work": {
         agent.anim = "type";
-        agent.progress = Math.min(1, agent.timer / action.dur);
         agent.taskLabel = action.label;
+        if (action.until) {
+          agent.progress = Math.min(0.97, action.progress?.() ?? 0);
+          if (agent.timer >= action.dur && action.until()) {
+            agent.progress = 1;
+            agent.current = null;
+          }
+          break;
+        }
+        agent.progress = Math.min(1, agent.timer / action.dur);
         if (agent.timer >= action.dur) {
           agent.progress = 1;
           agent.current = null;
@@ -1269,6 +1402,7 @@ export class Company {
       focusMode: this.focusMode,
       spotlight: this.spotlight,
       busyWithOrder: this.side.gen !== null,
+      job: this.job?.data() ?? null,
     };
   }
 }
