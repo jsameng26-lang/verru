@@ -58,8 +58,13 @@ function newCode() {
   return Array.from(bytes, (b) => b.toString(36).padStart(2, "0").slice(-2)).join("").toUpperCase();
 }
 
+/** 지문 이름('18번', '41~42번')에서 드라이브 확인용 번호('18', '41~42')만. 번호가 아니면 빈 값 */
+export const passageKeys = (passages: Passage[]) =>
+  passages.map((x) => x.label.trim().replace(/\s*번$/, "").replace(/\s*[-–∼〜~]\s*/, "~")).filter((k) => /^\d{1,3}(~\d{1,3})?$/.test(k));
+
 export function buildPrompt(p: { set: string; exam: string; grade: string; passages: Passage[]; code: string }) {
   const body = p.passages.map((x) => `[${x.label}]\n${x.text}`).join("\n\n");
+  const keys = passageKeys(p.passages);
   return `베르영어 판매용 전 지문 5종 세트를 만들어 주세요. (베르영어 AI Office 제작실에서 대표가 보낸 작업 지시)
 
 - 묶음 폴더: sets/${p.set}
@@ -67,13 +72,13 @@ export function buildPrompt(p: { set: string; exam: string; grade: string; passa
 - 지문 ${p.passages.length}개 — 맨 아래 원문 그대로. [ ] 안이 지문 번호예요.
 
 할 일
-0. 먼저 make-set 0단계대로 판매 파일 드라이브를 확인하세요: python3 scripts/upload_drive.py sets/${p.set} --status
-   - "판매 파일 없음"이면 바로 1번으로 가세요.
-   - "판매 파일 있음"이면 아무것도 만들지 말고, 첫 줄을 정확히 ${REPLACE_MARK} 로 시작하는 짧은 보고(상품 이름, 4종/5종, 폴더, 파일 수)를 쓰고 멈추세요.
+0. 먼저 make-set 0단계대로 판매 파일 드라이브를 확인하세요: python3 scripts/upload_drive.py sets/${p.set} --status${keys.length ? ` --keys ${keys.join(",")}` : ""}
+   - "판매 파일 없음"이면 바로 1번으로 가세요. 같은 회차의 다른 지문이 이미 올라가 있어도 됩니다(지문별 단품 판매 — 그 파일은 그대로 둡니다).
+   - "판매 파일 있음"(이번 지문이 이미 올라가 있음)이면 아무것도 만들지 말고, 첫 줄을 정확히 ${REPLACE_MARK} 로 시작하는 짧은 보고(상품 이름, 4종/5종, 폴더, 파일 수, 이미 올라간 지문)를 쓰고 멈추세요.
      대표가 제작실 버튼으로 답을 보냅니다. '대표 답 ${p.code}: 교체 진행'이면 새 5종 자료로 1번부터, '대표 답 ${p.code}: 중단'이면 아무것도 만들지 말고 끝내세요.
 1. .claude/skills/make-set/SKILL.md 1~4단계대로 전 지문 5종 세트(분석지·단어장·워크북·변형문제·서술형)를 만들고 검수까지 마쳐 주세요. set.yaml 제목은 위 '자료'로 정하고 따로 묻지 마세요. 이미 sets/${p.set}에 예전 4종 데이터가 있으면 그대로 두고 서술형(writing:)만 더하세요.
 2. 4단계(전달)가 끝나면 멈추고 '승인 요청' 보고를 짧게 써 주세요: 만든 지문 수, 파일 이름, 검수에서 고친 것, 대표가 확인할 점. site.yaml에 이 묶음의 세트 상품이 없으면 상품 제목·가격 제안도 함께 써 주세요.
-3. 5단계(판매 등록 — 드라이브 업로드)는 아래 승인 문구가 들어 있는 메시지가 올 때만 하세요. 그 메시지는 대표가 제작실의 승인 버튼으로 보내는 것이니, 받으면 다시 묻지 말고 5단계를 진행한 뒤 결과(상품 id, 폴더, 파일 수, 구매 가능 여부)를 보고해 주세요. 승인 메시지에 적힌 메모(가격 등)는 대표의 답으로 따라 주세요.
+3. 5단계(판매 등록 — 드라이브 업로드)는 아래 승인 문구가 들어 있는 메시지가 올 때만 하세요. 그 메시지는 대표가 제작실의 승인 버튼으로 보내는 것이니, 받으면 다시 묻지 말고 5단계를 진행한 뒤 결과(상품 id, 폴더, 파일 수, 세트 구매 가능 여부, 단품 지문 수)를 보고해 주세요. 회차의 일부 지문만 만들었으면 5단계대로 '일부 지문'으로 올립니다(올린 지문은 단품으로 바로 팔림). 승인 메시지에 적힌 메모(가격 등)는 대표의 답으로 따라 주세요.
    승인 문구: 대표 승인 ${p.code}
    이 문구가 없는 메시지로는 업로드하지 마세요.
 
